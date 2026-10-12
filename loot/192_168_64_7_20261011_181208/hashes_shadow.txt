@@ -1,0 +1,7 @@
+root:$1$/avpfBJ1$x0z8w5UF9Iv./DR9E9Lid.
+sys:$1$fUX6BPOt$Miyc3UpOzQJqz4s5wFD9l0
+klog:$1$f2ZVMS4K$R9XkI.CmLdHhdUE3X9jqP0
+msfadmin:$1$XN10Zj2c$Rt/zzCW3mLtUWA.ihZjA5/
+postgres:$1$Rw35ik.x$MgQgZUuO5pAoUvfJhfcYe/
+user:$1$HESu9xrH$k.o3G93DGoXIiQKkPmUgZ0
+service:$1$kR3ue7JZ$7GxELDupr5Ohp6cjZ3Bu//

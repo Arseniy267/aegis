@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Виртуальные окружения
+venv/
+.venv/
+env/
+
+# macOS
+.DS_Store
+
+# Секреты
+.env
+*.log
+
+# Большие файлы (заливаются отдельно, если нужно)
+wordlists/rockyou.txt
+wordlists/top1M.txt

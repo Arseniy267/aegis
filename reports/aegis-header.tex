@@ -1,0 +1,18 @@
+
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\definecolor{aegisred}{HTML}{CC0000}
+\definecolor{aegiscyan}{HTML}{0099CC}
+\definecolor{aegisgray}{HTML}{666666}
+\definecolor{evidencegreen}{HTML}{008844}
+\titleformat{\section}{\color{aegisred}\Large\bfseries}{\thesection}{1em}{}
+\titleformat{\subsection}{\color{aegiscyan}\large\bfseries}{\thesubsection}{1em}{}
+\titleformat{\subsubsection}{\color{aegisgray}\normalsize\bfseries}{\thesubsubsection}{1em}{}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\textcolor{aegisgray}{AEGIS Report}}
+\fancyhead[R]{\textcolor{aegisgray}{\thepage}}
+\renewcommand{\headrulewidth}{0.4pt}
