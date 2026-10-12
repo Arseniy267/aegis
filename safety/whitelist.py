@@ -3,9 +3,7 @@
 WHITELIST = {
     "192.168.64.7",   # Metasploitable2
     "127.0.0.1",
-    "localhost",
-    "82.204.184.177"
-
+    "localhost"
 }
 
 
