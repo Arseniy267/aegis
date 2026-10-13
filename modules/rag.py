@@ -78,7 +78,20 @@ def _get_session() -> requests.Session:
 # KNOWN_CVES — fallback only (offline / NVD down)
 # ========================================================================
 KNOWN_CVES = [
-    # ... оставить весь твой текущий список без изменений ...
+    {
+    "pattern": r"Mikrotik\s*dnsd",
+    "cves": [
+        {"cve_id": "CVE-2023-30800", "score": 7.5, "year": 2023,
+         "desc": "MikroTik RouterOS: DoS в DNS-сервере через malformed DNS-пакет."},
+    ],
+},
+{
+    "pattern": r"(RouterOS|Winbox)",
+    "cves": [
+        {"cve_id": "CVE-2018-14847", "score": 9.8, "year": 2018,
+         "desc": "MikroTik RouterOS 6.29-6.42: Winbox auth bypass (порт 8291)."},
+    ],
+},
 ]
 
 
