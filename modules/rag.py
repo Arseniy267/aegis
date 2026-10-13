@@ -78,261 +78,314 @@ def _get_session() -> requests.Session:
 # KNOWN_CVES — fallback only (offline / NVD down)
 # ========================================================================
 KNOWN_CVES = [
-{
-    "pattern": r"Confluence",
-    "cves": [
-        {"cve_id": "CVE-2021-26084", "score": 9.8, "year": 2021,
-         "desc": "Confluence Server < 7.13.0: OGNL injection RCE (unauthenticated)."},
-        {"cve_id": "CVE-2023-22515", "score": 10.0, "year": 2023,
-         "desc": "Confluence Data Center < 8.5.1: broken access control — создать admin."},
-    ],
-},
-# SMB EternalBlue — Windows
-{
-    "pattern": r"Microsoft.*SMB|Windows.*SMB",
-    "cves": [
-        {"cve_id": "CVE-2017-0144", "score": 8.1, "year": 2017,
-         "desc": "SMBv1 EternalBlue: RCE через crafted packet (MS17-010). "
-                 "Требует SMBv1 включённым."},
-    ],
-},
+    # ====================================================================
+    # LEGACY (Metasploitable2, старые CTF)
+    # ====================================================================
+    {
+        "pattern": r"vsftpd\s*2\.3\.4",
+        "cves": [
+            {"cve_id": "CVE-2011-2523", "score": 10.0, "year": 2011,
+             "desc": "vsftpd 2.3.4 backdoor: логин с ':)' открывает root shell на порту 6200."},
+        ],
+    },
+    {
+        "pattern": r"Samba\s*3\.[0-9]|smbd\s*3\.",
+        "cves": [
+            {"cve_id": "CVE-2007-2447", "score": 10.0, "year": 2007,
+             "desc": "Samba 3.0.0-3.0.25rc3: username map script RCE."},
+        ],
+    },
+    {
+        "pattern": r"UnrealIRCd",
+        "cves": [
+            {"cve_id": "CVE-2010-2075", "score": 10.0, "year": 2010,
+             "desc": "UnrealIRCd 3.2.8.1: backdoor."},
+        ],
+    },
+    {
+        "pattern": r"PHP/5\.",
+        "cves": [
+            {"cve_id": "CVE-2012-1823", "score": 9.8, "year": 2012,
+             "desc": "PHP-CGI 5.3.12/5.4.2: RCE через query string."},
+        ],
+    },
+    {
+        "pattern": r"VNC.*3\.3",
+        "cves": [
+            {"cve_id": "CVE-2006-2369", "score": 7.5, "year": 2006,
+             "desc": "RealVNC 4.1.1: обход аутентификации через security type None."},
+        ],
+    },
+    {
+        "pattern": r"OpenSSH\s*[4-7]\.",
+        "cves": [
+            {"cve_id": "CVE-2016-0777", "score": 6.5, "year": 2016,
+             "desc": "OpenSSH client roaming: утечка приватного ключа."},
+            {"cve_id": "CVE-2018-15473", "score": 5.3, "year": 2018,
+             "desc": "OpenSSH < 7.7: user enumeration."},
+        ],
+    },
+    {
+        "pattern": r"Apache\s*httpd\s*2\.2",
+        "cves": [
+            {"cve_id": "CVE-2017-7659", "score": 7.5, "year": 2017,
+             "desc": "Apache 2.2.x: DoS через malformed HTTP/2 request."},
+        ],
+    },
+    {
+        "pattern": r"MySQL\s*5\.0",
+        "cves": [
+            {"cve_id": "CVE-2012-2122", "score": 5.1, "year": 2012,
+             "desc": "MySQL 5.0.x: обход аутентификации через повторные попытки."},
+        ],
+    },
+    {
+        "pattern": r"PostgreSQL.*8\.3",
+        "cves": [
+            {"cve_id": "CVE-2013-1900", "score": 4.9, "year": 2013,
+             "desc": "PostgreSQL 8.3.x: утечка памяти через RNG."},
+        ],
+    },
+    {
+        "pattern": r"ProFTPD\s*1\.3\.1",
+        "cves": [
+            {"cve_id": "CVE-2010-4221", "score": 10.0, "year": 2010,
+             "desc": "ProFTPD 1.3.1: stack overflow в mod_tls (pre-auth RCE)."},
+        ],
+    },
+    {
+        "pattern": r"ISC\s*BIND\s*9\.4",
+        "cves": [
+            {"cve_id": "CVE-2008-0122", "score": 5.0, "year": 2008,
+             "desc": "BIND 9.4.x: off-by-one в inet_network(), DoS."},
+        ],
+    },
+    {
+        "pattern": r"Tomcat",
+        "cves": [
+            {"cve_id": "CVE-2017-12615", "score": 9.8, "year": 2017,
+             "desc": "Tomcat 7.0.0-7.0.79: RCE через PUT-запрос (требует readonly=false)."},
+            {"cve_id": "CVE-2020-1938", "score": 9.8, "year": 2020,
+             "desc": "Tomcat AJP Ghostcat: file read / RCE через AJP (порт 8009)."},
+        ],
+    },
 
-# SMBGhost — Windows 10
-{
-    "pattern": r"Microsoft.*SMB|Windows.*SMB",
-    "cves": [
-        {"cve_id": "CVE-2020-0796", "score": 10.0, "year": 2020,
-         "desc": "SMBv3 compression SMBGhost: RCE на Windows 10 1903/1909."},
-    ],
-},
+    # ====================================================================
+    # WEB APPS (HTB/THM)
+    # ====================================================================
+    {
+        "pattern": r"Drupal\s*[78]\.",
+        "cves": [
+            {"cve_id": "CVE-2018-7600", "score": 9.8, "year": 2018,
+             "desc": "Drupal 7.x < 7.58 / 8.x < 8.5.1: RCE через Form API (Drupalgeddon2)."},
+            {"cve_id": "CVE-2014-3704", "score": 7.5, "year": 2014,
+             "desc": "Drupal 7.x < 7.32: SQL injection (Drupalgeddon1)."},
+        ],
+    },
+    {
+        "pattern": r"WordPress",
+        "cves": [
+            {"cve_id": "CVE-2017-8295", "score": 5.9, "year": 2017,
+             "desc": "WordPress < 4.8.2: password reset через Host header."},
+            {"cve_id": "CVE-2019-8943", "score": 5.4, "year": 2019,
+             "desc": "WordPress < 5.0.1: path traversal в wp_crop_image (нужен admin)."},
+        ],
+    },
+    {
+        "pattern": r"Jenkins",
+        "cves": [
+            {"cve_id": "CVE-2018-1000861", "score": 9.8, "year": 2018,
+             "desc": "Jenkins < 2.150.1: RCE через Stapler routing (unauthenticated)."},
+            {"cve_id": "CVE-2019-1003000", "score": 8.8, "year": 2019,
+             "desc": "Jenkins < 2.150.2: sandbox bypass в Script Security (нужен Groovy)."},
+        ],
+    },
+    {
+        "pattern": r"GitLab",
+        "cves": [
+            {"cve_id": "CVE-2021-22205", "score": 10.0, "year": 2021,
+             "desc": "GitLab CE/EE < 13.10.3: unauthenticated RCE через ExifTool DjVu."},
+        ],
+    },
+    {
+        "pattern": r"Confluence",
+        "cves": [
+            {"cve_id": "CVE-2021-26084", "score": 9.8, "year": 2021,
+             "desc": "Confluence Server < 7.13.0: OGNL injection RCE (unauthenticated)."},
+            {"cve_id": "CVE-2023-22515", "score": 10.0, "year": 2023,
+             "desc": "Confluence Data Center < 8.5.1: broken access control — создать admin."},
+        ],
+    },
+    {
+        "pattern": r"WebLogic",
+        "cves": [
+            {"cve_id": "CVE-2020-14882", "score": 9.8, "year": 2020,
+             "desc": "Oracle WebLogic: RCE через console (unauthenticated)."},
+            {"cve_id": "CVE-2019-2725", "score": 9.8, "year": 2019,
+             "desc": "WebLogic < 10.3.6 / 12.1.3: RCE через wls-wsat (unauthenticated)."},
+        ],
+    },
 
-# RDP BlueKeep — Windows Server 2008/7
-{
-    "pattern": r"RDP|ms-wbt-server",
-    "cves": [
-        {"cve_id": "CVE-2019-0708", "score": 9.8, "year": 2019,
-         "desc": "RDP BlueKeep: pre-auth RCE на Windows 7 / Server 2008."},
-    ],
-},
-
-# OpenSSH regreSSHion — современный
-{
-    "pattern": r"OpenSSH\s*[89]\.|OpenSSH\s*[89]\.[0-9]",
-    "cves": [
-        {"cve_id": "CVE-2024-6387", "score": 8.1, "year": 2024,
-         "desc": "OpenSSH 8.5p1-9.7p1: regreSSHion — race condition RCE "
-                 "(требует много попыток, glibc-based)."},
-    ],
-},
-
-# Elasticsearch Groovy sandbox
-{
-    "pattern": r"Elasticsearch",
-    "cves": [
-        {"cve_id": "CVE-2015-1427", "score": 9.8, "year": 2015,
-         "desc": "Elasticsearch < 1.4.3: Groovy sandbox bypass RCE."},
-        {"cve_id": "CVE-2014-3120", "score": 9.8, "year": 2014,
-         "desc": "Elasticsearch < 1.2.0: RCE через MVEL script (dynamic scripting)."},
-    ],
-},
-
-# Redis — Lua sandbox
-{
-    "pattern": r"Redis",
-    "cves": [
-        {"cve_id": "CVE-2022-0543", "score": 10.0, "year": 2022,
-         "desc": "Redis Lua sandbox escape RCE (Debian/Ubuntu package-specific)."},
-    ],
-},
-
-# VPN appliances
-{
-    "pattern": r"Fortinet|FortiGate|FortiOS",
-    "cves": [
-        {"cve_id": "CVE-2018-13379", "score": 9.8, "year": 2018,
-         "desc": "FortiOS SSL VPN path traversal — чтение creds из session-файла."},
-    ],
-},
-{
-    "pattern": r"Citrix|NetScaler",
-    "cves": [
-        {"cve_id": "CVE-2019-19781", "score": 9.8, "year": 2019,
-         "desc": "Citrix ADC path traversal + RCE (unauthenticated)."},
-    ],
-},
-{
-    "pattern": r"Pulse|PulseSecure",
-    "cves": [
-        {"cve_id": "CVE-2019-11510", "score": 10.0, "year": 2019,
-         "desc": "Pulse Secure SSL VPN: произвольное чтение файлов, включая "
-                 "сессии и creds."},
-    ],
-},
-
-# Exchange — ProxyLogon / ProxyShell
-{
-    "pattern": r"Microsoft.*Exchange|Exchange Server",
-    "cves": [
-        {"cve_id": "CVE-2021-26855", "score": 9.8, "year": 2021,
-         "desc": "Exchange ProxyLogon: SSRF → RCE (комплекс с CVE-2021-26857/26858/27065)."},
-        {"cve_id": "CVE-2021-34473", "score": 9.8, "year": 2021,
-         "desc": "Exchange ProxyShell: pre-auth RCE (комплекс с CVE-2021-34523/31207)."},
-    ],
-},
-# Shellshock — Bash через CGI
-{
-    "pattern": r"(Apache|nginx|httpd|CGI|Bash)",
+    # ====================================================================
+    # UNIVERSAL WEB-TECH
+    # ====================================================================
+    {
+        "pattern": r"Apache\s*httpd\s*2\.4\.(49|50)",
+        "cves": [
+            {"cve_id": "CVE-2021-41773", "score": 9.8, "year": 2021,
+             "desc": "Apache 2.4.49: path traversal + RCE (mod_cgi)."},
+            {"cve_id": "CVE-2021-42013", "score": 9.8, "year": 2021,
+             "desc": "Apache 2.4.50: неполный фикс CVE-2021-41773, обход через '.%2e'."},
+        ],
+    },
+    {
+        "pattern": r"OpenSSL\s*1\.0\.1",
+        "cves": [
+            {"cve_id": "CVE-2014-0160", "score": 7.5, "year": 2014,
+             "desc": "OpenSSL 1.0.1-1.0.1f: Heartbleed — утечка памяти (ключа) через TLS heartbeat."},
+        ],
+    },
+    {
+        "pattern": r"PHP[- ]?FPM",
+        "cves": [
+            {"cve_id": "CVE-2019-11043", "score": 9.8, "year": 2019,
+             "desc": "PHP-FPM < 7.1.33: buffer underflow RCE через fastcgi_split_path_info."},
+        ],
+    },
+    {
+        "pattern": r"(Log4j|Log4Shell)",
+        "cves": [
+            {"cve_id": "CVE-2021-44228", "score": 10.0, "year": 2021,
+             "desc": "Apache Log4j2 < 2.15.0: JNDI RCE через лог-сообщение."},
+            {"cve_id": "CVE-2021-45046", "score": 9.0, "year": 2021,
+             "desc": "Log4j2 < 2.16.0: обход фикса CVE-2021-44228 через context lookup."},
+        ],
+    },
+    {
+        "pattern": r"Spring",
+        "cves": [
+            {"cve_id": "CVE-2022-22965", "score": 9.8, "year": 2022,
+             "desc": "Spring Framework < 5.3.18: RCE через data binding (Spring4Shell). Требует Java 9+ и WAR на Tomcat."},
+        ],
+    },
+    {
+    "pattern": r"(Bash|CGI|CGI-BIN|shellshock)",
     "cves": [
         {"cve_id": "CVE-2014-6271", "score": 9.8, "year": 2014,
          "desc": "GNU Bash < 4.3: Shellshock, RCE через env-переменные. "
-                 "Применимо ТОЛЬКО если есть CGI-скрипты на bash."},
+                 "Применимо ТОЛЬКО если на цели есть CGI-скрипты на bash."},
     ],
-},
+    },
 
-# Heartbleed — OpenSSL
-{
-    "pattern": r"OpenSSL\s*1\.0\.1",
-    "cves": [
-        {"cve_id": "CVE-2014-0160", "score": 7.5, "year": 2014,
-         "desc": "OpenSSL 1.0.1-1.0.1f: Heartbleed — утечка памяти "
-                 "(включая приватные ключи) через TLS heartbeat."},
-    ],
-},
+    # ====================================================================
+    # NETWORK SERVICES
+    # ====================================================================
+    {
+        "pattern": r"Microsoft.*SMB|Windows.*SMB",
+        "cves": [
+            {"cve_id": "CVE-2017-0144", "score": 8.1, "year": 2017,
+             "desc": "SMBv1 EternalBlue: RCE (MS17-010). Требует SMBv1 включённым."},
+            {"cve_id": "CVE-2020-0796", "score": 10.0, "year": 2020,
+             "desc": "SMBv3 compression SMBGhost: RCE на Windows 10 1903/1909."},
+        ],
+    },
+    {
+        "pattern": r"RDP|ms-wbt-server",
+        "cves": [
+            {"cve_id": "CVE-2019-0708", "score": 9.8, "year": 2019,
+             "desc": "RDP BlueKeep: pre-auth RCE на Windows 7 / Server 2008."},
+        ],
+    },
+    {
+        "pattern": r"OpenSSH\s*[89]\.[0-7]",
+        "cves": [
+            {"cve_id": "CVE-2024-6387", "score": 8.1, "year": 2024,
+             "desc": "OpenSSH 8.5p1-9.7p1: regreSSHion — race condition RCE (glibc-based)."},
+        ],
+    },
+    {
+        "pattern": r"Elasticsearch",
+        "cves": [
+            {"cve_id": "CVE-2015-1427", "score": 9.8, "year": 2015,
+             "desc": "Elasticsearch < 1.4.3: Groovy sandbox bypass RCE."},
+            {"cve_id": "CVE-2014-3120", "score": 9.8, "year": 2014,
+             "desc": "Elasticsearch < 1.2.0: RCE через MVEL script (dynamic scripting)."},
+        ],
+    },
+    {
+        "pattern": r"Redis",
+        "cves": [
+            {"cve_id": "CVE-2022-0543", "score": 10.0, "year": 2022,
+             "desc": "Redis Lua sandbox escape RCE (Debian/Ubuntu package-specific)."},
+        ],
+    },
 
-# Apache 2.4.49/2.4.50 path traversal / RCE
-{
-    "pattern": r"Apache\s*httpd\s*2\.4\.(49|50)",
-    "cves": [
-        {"cve_id": "CVE-2021-41773", "score": 9.8, "year": 2021,
-         "desc": "Apache 2.4.49: path traversal + RCE (mod_cgi)."},
-        {"cve_id": "CVE-2021-42013", "score": 9.8, "year": 2021,
-         "desc": "Apache 2.4.50: неполный фикс CVE-2021-41773, обход через ".%2e"."},
-    ],
-},
+    # ====================================================================
+    # VPN APPLIANCES
+    # ====================================================================
+    {
+        "pattern": r"Fortinet|FortiGate|FortiOS",
+        "cves": [
+            {"cve_id": "CVE-2018-13379", "score": 9.8, "year": 2018,
+             "desc": "FortiOS SSL VPN path traversal — чтение creds из session-файла."},
+        ],
+    },
+    {
+        "pattern": r"Citrix|NetScaler",
+        "cves": [
+            {"cve_id": "CVE-2019-19781", "score": 9.8, "year": 2019,
+             "desc": "Citrix ADC path traversal + RCE (unauthenticated)."},
+        ],
+    },
+    {
+        "pattern": r"Pulse|PulseSecure",
+        "cves": [
+            {"cve_id": "CVE-2019-11510", "score": 10.0, "year": 2019,
+             "desc": "Pulse Secure SSL VPN: произвольное чтение файлов, включая сессии и creds."},
+        ],
+    },
 
-# Log4Shell — если на цели Java-стек
-{
-    "pattern": r"(Log4j|Log4Shell|Java\s*1\.[7-8])",
-    "cves": [
-        {"cve_id": "CVE-2021-44228", "score": 10.0, "year": 2021,
-         "desc": "Apache Log4j2 < 2.15.0: JNDI RCE через лог-сообщение."},
-        {"cve_id": "CVE-2021-45046", "score": 9.0, "year": 2021,
-         "desc": "Log4j2 < 2.16.0: обход фикса CVE-2021-44228 через context lookup."},
-    ],
-},
+    # ====================================================================
+    # EXCHANGE
+    # ====================================================================
+    {
+        "pattern": r"Microsoft.*Exchange|Exchange Server",
+        "cves": [
+            {"cve_id": "CVE-2021-26855", "score": 9.8, "year": 2021,
+             "desc": "Exchange ProxyLogon: SSRF → RCE (комплекс с CVE-2021-26857/26858/27065)."},
+            {"cve_id": "CVE-2021-34473", "score": 9.8, "year": 2021,
+             "desc": "Exchange ProxyShell: pre-auth RCE (комплекс с CVE-2021-34523/31207)."},
+        ],
+    },
 
-# Spring — Spring4Shell
-{
-    "pattern": r"Spring",
-    "cves": [
-        {"cve_id": "CVE-2022-22965", "score": 9.8, "year": 2022,
-         "desc": "Spring Framework < 5.3.18 / 5.2.20: RCE через data binding (Spring4Shell). "
-                 "Требует Java 9+ и WAR на Tomcat."},
-    ],
-},
-
-# PHP-FPM — underflow RCE
-{
-    "pattern": r"PHP[- ]?FPM",
-    "cves": [
-        {"cve_id": "CVE-2019-11043", "score": 9.8, "year": 2019,
-         "desc": "PHP-FPM < 7.1.33: buffer underflow RCE через fastcgi_split_path_info."},
-    ],
-},
-# Drupal — Drupalgeddon2
-{
-    "pattern": r"Drupal\s*[78]\.",
-    "cves": [
-        {"cve_id": "CVE-2018-7600", "score": 9.8, "year": 2018,
-         "desc": "Drupal 7.x < 7.58 / 8.x < 8.3.9 / 8.4.x < 8.4.6 / 8.5.x < 8.5.1: "
-                 "RCE через Form API (Drupalgeddon2)."},
-        {"cve_id": "CVE-2014-3704", "score": 7.5, "year": 2014,
-         "desc": "Drupal 7.x < 7.32: SQL injection (Drupalgeddon1)."},
-    ],
-},
-
-# WordPress — бесконечные плагины
-{
-    "pattern": r"WordPress",
-    "cves": [
-        {"cve_id": "CVE-2017-8295", "score": 5.9, "year": 2017,
-         "desc": "WordPress < 4.8.2: password reset через Host header."},
-        {"cve_id": "CVE-2019-8943", "score": 5.4, "year": 2019,
-         "desc": "WordPress < 5.0.1: path traversal в wp_crop_image (требует WP admin)."},
-    ],
-},
-
-# Jenkins — classic CI RCE
-{
-    "pattern": r"Jenkins",
-    "cves": [
-        {"cve_id": "CVE-2018-1000861", "score": 9.8, "year": 2018,
-         "desc": "Jenkins < 2.150.1: RCE через Stapler routing (unauthenticated)."},
-        {"cve_id": "CVE-2019-1003000", "score": 8.8, "year": 2019,
-         "desc": "Jenkins < 2.150.2: sandbox bypass в Script Security (нужен доступ к Groovy)."},
-    ],
-},
-
-# GitLab — ExifTool RCE
-{
-    "pattern": r"GitLab",
-    "cves": [
-        {"cve_id": "CVE-2021-22205", "score": 10.0, "year": 2021,
-         "desc": "GitLab CE/EE < 13.10.3: unauthenticated RCE через загрузку "
-                 "изображения (ExifTool DjVu)."},
-    ],
-},
-
-# Tomcat — PUT method + manager
-{
-    "pattern": r"Tomcat",
-    "cves": [
-        {"cve_id": "CVE-2017-12615", "score": 9.8, "year": 2017,
-         "desc": "Tomcat 7.0.0-7.0.79: RCE через PUT-запрос (требует readonly=false)."},
-        {"cve_id": "CVE-2020-1938", "score": 9.8, "year": 2020,
-         "desc": "Tomcat AJP Ghostcat: file read / RCE через AJP (порт 8009)."},
-    ],
-},
-
-# WebLogic — много RCE
-{
-    "pattern": r"WebLogic",
-    "cves": [
-        {"cve_id": "CVE-2020-14882", "score": 9.8, "year": 2020,
-         "desc": "Oracle WebLogic: RCE через console (unauthenticated, CVSS 9.8)."},
-        {"cve_id": "CVE-2019-2725", "score": 9.8, "year": 2019,
-         "desc": "WebLogic < 10.3.6 / 12.1.3: RCE через wls-wsat (unauthenticated)."},
-    ],
-},
-{
-    "pattern": r"Angie",
-    "cves": [
-        {"cve_id": "CVE-2024-7347", "score": 4.7, "year": 2024,
-         "desc": "Angie < 1.8.0 (nginx < 1.27.0): OOB read в ngx_http_mp4_module. "
-                 "Требуется версия для подтверждения."},
-        {"cve_id": "CVE-2023-44487", "score": 7.5, "year": 2023,
-         "desc": "HTTP/2 Rapid Reset — универсальная DoS-техника для всех "
-                 "HTTP/2-серверов (nginx, Angie, Apache, IIS, Envoy)."},
-        {"cve_id": "CVE-2021-23017", "score": 7.7, "year": 2021,
-         "desc": "nginx resolver off-by-one. Применимо ТОЛЬКО если в конфиге "
-                 "используется resolver (use resolver). Требует проверки конфига."},
-    ],
-},
-{
-    "pattern": r"Mikrotik\s*dnsd",
-    "cves": [
-        {"cve_id": "CVE-2023-30800", "score": 7.5, "year": 2023,
-         "desc": "MikroTik RouterOS: DoS в DNS-сервере через malformed DNS-пакет."},
-    ],
-},
-{
-    "pattern": r"(RouterOS|Winbox)",
-    "cves": [
-        {"cve_id": "CVE-2018-14847", "score": 9.8, "year": 2018,
-         "desc": "MikroTik RouterOS 6.29-6.42: Winbox auth bypass (порт 8291)."},
-    ],
-},
-    
+    # ====================================================================
+    # ANGIE / MIKROTIK (специфика твоих тестов)
+    # ====================================================================
+    {
+        "pattern": r"Angie",
+        "cves": [
+            {"cve_id": "CVE-2024-7347", "score": 4.7, "year": 2024,
+             "desc": "Angie < 1.8.0 (nginx < 1.27.0): OOB read в ngx_http_mp4_module. Требуется версия для подтверждения."},
+            {"cve_id": "CVE-2023-44487", "score": 7.5, "year": 2023,
+             "desc": "HTTP/2 Rapid Reset — универсальная DoS для всех HTTP/2-серверов (nginx, Angie, Apache, IIS, Envoy)."},
+            {"cve_id": "CVE-2021-23017", "score": 7.7, "year": 2021,
+             "desc": "nginx resolver off-by-one. Применимо ТОЛЬКО если в конфиге используется resolver (use resolver)."},
+        ],
+    },
+    {
+        "pattern": r"Mikrotik\s*dnsd",
+        "cves": [
+            {"cve_id": "CVE-2023-30800", "score": 7.5, "year": 2023,
+             "desc": "MikroTik RouterOS: DoS в DNS-сервере через malformed DNS-пакет."},
+        ],
+    },
+    {
+        "pattern": r"(RouterOS|Winbox)",
+        "cves": [
+            {"cve_id": "CVE-2018-14847", "score": 9.8, "year": 2018,
+             "desc": "MikroTik RouterOS 6.29-6.42: Winbox auth bypass (порт 8291)."},
+        ],
+    },
 ]
 
 
