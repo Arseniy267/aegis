@@ -3,13 +3,15 @@
 import os
 import sys
 import re
+import structlog
 import subprocess
 from datetime import datetime
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
-
+    
+log = structlog.get_logger("reporter")
 
 LATEX_HEADER = r"""
 \usepackage{xcolor}
@@ -49,48 +51,82 @@ def _cve_rows(data):
         mx = p.get("max_score", 0.0)
         if cnt == 0 and mx == 0:
             continue
+
         text = cves.get(port, "")
-        ids = re.findall(r"CVE-\d{4}-\d{4,}", text)
-        top = ", ".join(sorted(set(ids))[:3])
+
+        # парсим пары (id, score) из текста RAG
+        pairs = []
+        for line in text.splitlines():
+            m_id = re.search(r"CVE-\d{4}-\d{4,}", line)
+            m_sc = re.search(r"CVSS:\s*([\d.]+)", line)
+            if m_id:
+                sc = float(m_sc.group(1)) if m_sc else 0.0
+                pairs.append((m_id.group(0), sc))
+
+        # сортируем по score по убыванию, берём топ-3
+        pairs.sort(key=lambda x: -x[1])
+        seen = set()
+        top_ids = []
+        for cid, _ in pairs:
+            if cid not in seen:
+                seen.add(cid)
+                top_ids.append(cid)
+            if len(top_ids) == 3:
+                break
+
+        top = ", ".join(top_ids)
         rows.append((port, svc, cnt, mx, top))
     return rows
 
 
 def _evidence_section(data):
-    """Секция доказательств взлома. Всегда возвращает строку."""
-    parts = []
+    """
+    Только ДОКАЗАТЕЛЬСТВА: shell, команды, shadow, cracked creds.
+    НЕ содержит IMPACT — он вынесен в _impact_section.
+    """
     ev = data.get("evidence") or {}
+    if not ev:
+        return ""
 
+    parts = []
     parts.append("\\newpage\n")
     parts.append("# ДОКАЗАТЕЛЬСТВА ВЗЛОМА\n\n")
-
-    if not ev:
-        parts.append("_Эксплуатация не дала evidence._\n\n")
-        return "".join(parts)
-
     parts.append("\\textcolor{evidencegreen}{\\textbf{Ниже — реальные команды, "
                  "выполненные на целевой машине через полученный root shell.}}\n\n")
 
+    # --- подключение ---
     parts.append("## Соединение с целевой машиной\n\n")
     parts.append(f"**Target:** `{clean_text(ev.get('target', '—'))}`  \n")
     parts.append(f"**Shell:** `{clean_text(ev.get('shell', '—'))}`  \n")
+    if ev.get("id_out"):
+        parts.append(f"**Identity:** `{clean_text(ev['id_out'])}`  \n")
     parts.append(f"**Время:** `{clean_text(ev.get('timestamp', '—'))}`  \n\n")
 
+    # --- команды ---
     commands = ev.get("commands") or []
     if commands:
         parts.append("## Выполненные команды\n\n")
-        for label, cmd, out in commands:
-            parts.append(f"### `{cmd}`\n\n")
+        for entry in commands:
+            # поддержка (label, cmd, out) и (cmd, out)
+            if len(entry) == 3:
+                _label, cmd, out = entry
+            elif len(entry) == 2:
+                cmd, out = entry
+            else:
+                continue
+            parts.append(f"### `{clean_text(cmd)}`\n\n")
             parts.append("```\n")
             parts.append(clean_text(out)[:1000])
             parts.append("\n```\n\n")
 
+    # --- shadow ---
     if ev.get("shadow_head"):
         parts.append("## Содержимое /etc/shadow (первые строки)\n\n")
         parts.append("```\n")
         parts.append(clean_text(ev["shadow_head"])[:800])
         parts.append("\n```\n\n")
 
+    # --- cracked creds ---
     if ev.get("cracked"):
         parts.append("## Взломанные учётные данные\n\n")
         parts.append("\\textcolor{aegisred}{\\textbf{КРИТИЧНО:}}\n\n")
@@ -99,33 +135,156 @@ def _evidence_section(data):
             parts.append(f"| `{clean_text(u)}` | `{clean_text(p)}` |\n")
         parts.append("\n")
 
-    parts.append("\\newpage\n")
-    parts.append("# IMPACT — Что злоумышленник мог бы сделать\n\n")
-    parts.append("""Получив root-доступ и взломав учётные данные, злоумышленник мог бы:
-
-1. **Войти по SSH как `msfadmin`** → полный интерактивный доступ к серверу
-2. **Подключиться к MySQL как `root`** → чтение/изменение всей БД
-3. **Использовать `sudo`** → выполнение любых команд
-4. **Установить persistence** → сохранить доступ после перезагрузки
-5. **Развернуть backdoor** → использовать как точку входа в сеть
-6. **Украсть данные** → скопировать все конфиги, БД, ключи
-7. **Pivot вглубь сети** → атаковать другие машины через эту
-
-**Что нужно защитить:**
-- Сменить все дефолтные пароли (msfadmin, root, service, user)
-- Обновить vsftpd до 3.0.x (устраняет backdoor)
-- Закрыть порт 6200 (backdoor shell)
-- Заменить Telnet на SSH
-- Настроить firewall
-""")
     return "".join(parts)
 
+def _risk_summary(data):
+    ports = data.get("ports") or []
+    if not ports:
+        return ""
+    crit = sum(1 for p in ports if p.get("max_score", 0) >= 9)
+    high = sum(1 for p in ports if 7 <= p.get("max_score", 0) < 9)
+    med  = sum(1 for p in ports if 4 <= p.get("max_score", 0) < 7)
+    low  = sum(1 for p in ports if 0 < p.get("max_score", 0) < 4)
+
+    return (
+        "\n## Сводка по критичности\n\n"
+        "| Уровень | Портов |\n|---|---|\n"
+        f"| CRIT (≥9.0) | {crit} |\n"
+        f"| HIGH (7.0–8.9) | {high} |\n"
+        f"| MED (4.0–6.9) | {med} |\n"
+        f"| LOW (<4.0) | {low} |\n\n"
+    )
+
+def _impact_section(data, exploit_results=None):
+    """
+    IMPACT — генерируется из реальных находок.
+    Никаких хардкодов под Metasploitable (msfadmin, vsftpd, порт 6200).
+    """
+    ev = data.get("evidence") or {}
+    cracked = ev.get("cracked") or []
+    ports = data.get("ports") or []
+    exploit_results = exploit_results or []
+
+    parts = []
+    parts.append("\\newpage\n")
+    parts.append("# IMPACT — Что злоумышленник мог бы сделать\n\n")
+
+    # --- уровень доступа ---
+    id_out = (ev.get("id_out") or "").strip()
+    is_root = "uid=0" in id_out or id_out.lower().startswith("root")
+
+    if is_root:
+        parts.append("Получен **root-доступ** через эксплуатацию:\n\n")
+    elif id_out:
+        parts.append(f"Получен доступ уровня пользователя "
+                     f"(`{clean_text(id_out[:60])}`):\n\n")
+    else:
+        parts.append("Эксплуатация дала доступ к системе:\n\n")
+
+    # --- что сработало ---
+    successful = [r for r in exploit_results
+                  if r.get("result", {}).get("success")]
+    for r in successful:
+        parts.append(f"- `{r.get('cve', '?')}` — "
+                     f"{clean_text(r.get('name', '?'))} "
+                     f"(порт {r.get('port', '?')})\n")
+    parts.append("\n")
+
+    # --- креды ---
+    if cracked:
+        parts.append("Взломаны учётные данные:\n\n")
+        parts.append("| Пользователь | Пароль |\n|---|---|\n")
+        for u, p in cracked:
+            parts.append(f"| `{clean_text(u)}` | `{clean_text(p)}` |\n")
+        parts.append("\n")
+        parts.append("Это позволяет злоумышленнику:\n\n")
+        parts.append("- Войти по SSH/SMB/иным протоколам с валидными кредами\n")
+        parts.append("- Использовать `sudo` там, где разрешено\n")
+        parts.append("- Установить persistence и сохранить доступ\n")
+        parts.append("- Провести lateral movement вглубь сети\n\n")
+    else:
+        parts.append("Доступ к системе позволяет злоумышленнику:\n\n")
+        parts.append("- Выполнять команды от имени полученного пользователя\n")
+        parts.append("- Читать файлы конфигурации, БД и ключи\n")
+        parts.append("- Использовать эту машину как точку pivot во внутреннюю сеть\n\n")
+
+    # --- рекомендации из реальных портов ---
+    open_ports = {p["port"] for p in ports}
+    svcs = {p.get("service", "").lower() for p in ports}
+
+    recs = []
+    if 6200 in open_ports:
+        recs.append("Закрыть порт 6200 (vsftpd backdoor shell)")
+    if 21 in open_ports or "ftp" in svcs:
+        recs.append("FTP: обновить сервер, отключить anonymous-доступ, "
+                    "перейти на SFTP/FTPS")
+    if 22 in open_ports or "ssh" in svcs:
+        recs.append("SSH: отключить парольную аутентификацию, перейти на ключи")
+    if 23 in open_ports or "telnet" in svcs:
+        recs.append("Telnet: заменить на SSH")
+    if {139, 445} & open_ports or "smb" in svcs:
+        recs.append("SMB: отключить SMBv1, закрыть 445/139 на периметре")
+    if 3306 in open_ports or "mysql" in svcs:
+        recs.append("MySQL: bind на 127.0.0.1, сменить root-пароль")
+    if 3389 in open_ports:
+        recs.append("RDP: включить NLA, ограничить по IP")
+    if 6379 in open_ports or "redis" in svcs:
+        recs.append("Redis: обязательно пароль + bind на localhost")
+    if {80, 443, 8080, 8443} & open_ports:
+        recs.append("Web: закрыть admin-панели по IP-whitelist, "
+                    "обновить серверы")
+
+    # универсальные
+    recs.append("Сменить все дефолтные пароли")
+    recs.append("Настроить firewall — закрыть неиспользуемые порты")
+
+    if recs:
+        parts.append("**Что нужно исправить:**\n\n")
+        for i, r in enumerate(recs, 1):
+            parts.append(f"{i}. {r}\n")
+        parts.append("\n")
+
+    return "".join(parts)
+
+
+def _recommendations(data, ports):
+    """Рекомендации на основе реальных портов. Без хардкодов."""
+    ports = ports or []
+    open_ports = {p["port"] for p in ports}
+    svcs = {p.get("service", "").lower() for p in ports}
+
+    recs = ["Обновить все устаревшие сервисы до актуальных версий."]
+
+    if 21 in open_ports or "ftp" in svcs:
+        recs.append("FTP: отключить anonymous, обновить сервер, перейти на FTPS/SFTP.")
+    if 22 in open_ports or "ssh" in svcs:
+        recs.append("SSH: отключить пароли, использовать ключи, ограничить по IP.")
+    if 23 in open_ports or "telnet" in svcs:
+        recs.append("Telnet: заменить на SSH — трафик в открытом виде.")
+    if {80, 443, 8080, 8443} & open_ports:
+        recs.append("Web: закрыть admin-панели по IP-whitelist, "
+                    "включить WAF, проверить TLS.")
+    if {139, 445} & open_ports or "smb" in svcs:
+        recs.append("SMB: отключить SMBv1, заблокировать 445/139 на периметре.")
+    if 3306 in open_ports or "mysql" in svcs:
+        recs.append("MySQL: bind на 127.0.0.1, сменить root-пароль.")
+    if 3389 in open_ports:
+        recs.append("RDP: включить NLA, ограничить по IP, включить MFA.")
+    if 6379 in open_ports or "redis" in svcs:
+        recs.append("Redis: пароль + bind на localhost, никаких открытых инстансов.")
+
+    recs.append("Firewall: закрыть всё, кроме действительно нужных портов.")
+    recs.append("Настроить логирование и алерты на подозрительную активность.")
+
+    return "\n".join(f"{i+1}. {r}" for i, r in enumerate(recs))
 
 def generate_report(target, recon_data, analysis, scripts_results=None, ports=None,
                     data=None, exploit_results=None):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     date_slug = datetime.now().strftime("%Y%m%d_%H%M%S")
 
+    skip_pdf = os.environ.get("AEGIS_NO_PDF", "0") == "1"      
+    
     analysis = clean_text(analysis)
     nmap_compressed = clean_text(recon_data.get("nmap_compressed", "нет данных"))
 
@@ -155,8 +314,6 @@ toc-title: "Содержание"
 {analysis if analysis else "нет данных"}
 
 # 3. CVE по сервисам
-"""
-
     if data:
         rows = _cve_rows(data)
         if rows:
@@ -194,19 +351,19 @@ toc-title: "Содержание"
 
     # Evidence
     has_evidence = (data and data.get("evidence") and 
-                    data["evidence"].get("commands"))
+                data["evidence"].get("commands"))
     if has_evidence:
         report += _evidence_section(data)
+        report += _impact_section(data, exploit_results)   # ← отдельный вызов
     elif exploit_results:
-        report += "\n# 5. Доказательства взлома\n\n"
+        report += "\n\\newpage\n# 5. Доказательства взлома\n\n"
         report += ("_Эксплуатация выполнена, но не дала root-доступа. "
                    "См. раздел 4 — все PoC отмечены как НЕ СРАБОТАЛО._\n\n")
     else:
-        report += "\n# 5. Эксплуатация — не выполнялась\n\n"
+        report += "\n\\newpage\n# 5. Эксплуатация — не выполнялась\n\n"
         report += ("_В базе AEGIS нет готовых PoC для найденных CVE. "
-                   "Все уязвимости требуют ручной проверки или специфических условий. "
-                   "См. раздел 8 — рекомендации._\n\n")
-
+                   "Все уязвимости требуют ручной проверки._\n\n")
+    
     # Проверка сервисов
     report += "\n# 6. Проверка сервисов\n\n"
     if scripts_results:
@@ -232,37 +389,37 @@ toc-title: "Содержание"
     else:
         report += "_Нет данных._\n\n"
 
-    report += """# 8. Рекомендации по защите
+report += "# 8. Рекомендации по защите\n\n"
+report += _recommendations(data, ports) + "\n\n"
 
-1. Обновить уязвимые сервисы до последних версий.
-2. Настроить firewall — закрыть неиспользуемые порты.
-3. Установить fail2ban для защиты от брутфорса.
-4. Заменить Telnet на SSH.
-5. Сменить все дефолтные пароли.
-6. Провести аудит конфигураций.
+    report += (
+        "\\vspace{1cm}\n\n"
+        "\\begin{center}\n"
+        "\\textcolor{aegisgray}{\\small AEGIS Web v2.3 — "
+        "Autonomous Exploitation \\& Guidance Intelligence System}\\\\\n"
+        "\\textcolor{aegisgray}{\\small Только для авторизованного пентеста.}\n"
+        "\\end{center}\n"
+    )
+    # --- Запись файлов ---
+    os.makedirs(REPORT_DIR, exist_ok=True)
 
-\\vspace{1cm}
-
-\\begin{center}
-\\textcolor{aegisgray}{\\small AEGIS Web v2.2 — Autonomous Exploitation \\& Guidance Intelligence System}\\\\
-\\textcolor{aegisgray}{\\small Только для авторизованного пентеста.}
-\\end{center}
-"""
-
-    os.makedirs("reports", exist_ok=True)
-
-    header_path = os.path.join("reports", "aegis-header.tex")
-    with open(header_path, "w") as f:
+    header_path = os.path.join(REPORT_DIR, "aegis-header.tex")
+    with open(header_path, "w", encoding="utf-8") as f:
         f.write(LATEX_HEADER)
 
-    md_path = f"reports/report_{date_slug}.md"
-    with open(md_path, "w") as f:
+    md_path = os.path.join(REPORT_DIR, f"report_{date_slug}.md")
+    with open(md_path, "w", encoding="utf-8") as f:
         f.write(report)
-    print(f"[+] Markdown: {md_path}")
+    log.info("report_markdown_written", path=md_path)
 
+    # --- PDF (опционально) ---
+    if skip_pdf:
+        log.info("pdf_skipped_by_env")
+        return md_path, None
     pdf_path = None
+
     try:
-        pdf_path = f"reports/report_{date_slug}.pdf"
+        pdf_path = os.path.join(REPORT_DIR, f"report_{date_slug}.pdf")
         result = subprocess.run(
             ["pandoc", md_path, "-o", pdf_path,
              "--pdf-engine=xelatex",
