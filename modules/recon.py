@@ -15,6 +15,8 @@ from config import (
     TIMEOUT_WHOIS, TIMEOUT_DIG
 )
 
+from templates.ftp import check_ftp
+
 COMMIX = os.path.expanduser("~/tools/commix/commix.py")
 ENUM4LINUX = os.path.expanduser("~/tools/enum4linux/enum4linux.pl")
 
@@ -95,6 +97,46 @@ def compress_nmap_output(nmap_output):
     lines = nmap_output.split("\n")
     compressed = [l for l in lines if "open" in l or "PORT" in l or "Nmap scan" in l]
     return "\n".join(compressed) or "нет открытых портов"
+
+
+# ============ FTP (structured) ============
+
+def run_ftp_check(host: str, port: int = 21) -> dict:
+    """Структурированная FTP-разведка. Возвращает dict."""
+    return check_ftp(
+        host, port,
+        try_anonymous=True,
+        try_ftps=True,
+        list_anon_root=True,
+    )
+
+
+def format_ftp_summary(result: dict) -> str:
+    """Превращает dict в текст для LLM-промпта."""
+    if not result.get("reachable"):
+        return f"FTP {result['host']}:{result['port']} unreachable: {result.get('errors')}"
+
+    lines = [f"FTP banner: {result.get('banner')}"]
+    if result.get("server"):
+        lines.append(f"Server: {result['server']} {result.get('version') or ''}".strip())
+    if result.get("os_hint"):
+        lines.append(f"OS hint: {result['os_hint']}")
+    if result.get("feat"):
+        lines.append(f"FEAT: {', '.join(result['feat'])}")
+    if result.get("ftps_supported"):
+        cn = result.get("ftps_cert_cn") or "?"
+        lines.append(f"FTPS: supported (cert CN={cn})")
+    if result.get("pasv_works"):
+        lines.append("PASV: works")
+    if result.get("anonymous_login"):
+        lines.append(f"🔴 ANONYMOUS LOGIN WORKS (user={result['anonymous_user']})")
+        if result.get("anon_cwd"):
+            lines.append(f"Root listing: {', '.join(result['anon_cwd'][:20])}")
+    else:
+        lines.append("Anonymous login: not allowed")
+    if result.get("errors"):
+        lines.append(f"Errors: {'; '.join(result['errors'][:3])}")
+    return "\n".join(lines)
 
 
 # ============ РАСШИРЕННЫЕ (SSL / nuclei) ============
