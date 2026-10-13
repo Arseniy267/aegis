@@ -287,19 +287,29 @@ def search_cve_local(query: str, n_results: int = 5,
 # ========================================================================
 # Public API
 # ========================================================================
-def get_cve_context(service: str, version: str | None = None,
-                    n: int = 5, years_back: int = YEARS_BACK) -> str:
-    """
-    Приоритет:
-        1. ChromaDB (быстро, offline)
-        2. NVD      (точно, online)
-        3. KNOWN_CVES (fallback при offline)
-    """
-    ver = version or ""
+def get_cve_context(service, version=None, n=5, years_back=YEARS_BACK):
+    ver = (version or "").strip()
     query = f"{service} {ver}".strip()
     min_year = datetime.now(timezone.utc).year - years_back
 
     log.debug("cve_lookup_started", service=service, version=ver)
+
+    # --- ПРОВЕРКА: версия не определена ---
+    version_known = (
+        ver
+        and ver.lower() not in ("unknown", "?", "-", service.lower())
+        and any(ch.isdigit() for ch in ver)   # есть хоть одна цифра
+    )
+
+    if not version_known:
+        # NVD-запрос по имени без версии — мусор, не делаем
+        known = known_cves_for(service, ver)
+        if known:
+            header = (f"[!] {service}: версия не определена — "
+                      f"CVE требуют ручной проверки:\n")
+            return header + format_known_cves(known[:n])
+        return (f"[!] {service}: версия не определена, "
+                f"CVE не найдены без уточнения версии.")
 
     # 1. Кеш
     cached = search_cve_local(
