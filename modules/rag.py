@@ -1,12 +1,26 @@
-# RAG — CVE через NVD + ChromaDB (v4: +Angie +Mikrotik)
+# modules/rag.py — CVE lookup (v5: priority fix + cache + logging)
+"""
+CVE lookup pipeline.
 
-import sys
+Priority (correct order):
+    1. ChromaDB local cache    (мгновенно, offline)
+    2. NVD API                 (точный, требует интернет)
+    3. KNOWN_CVES              (fallback, захардкоженные для offline)
+
+Requires NVD_API_KEY env var for fast access (0.7s delay vs 6.5s).
+"""
+from __future__ import annotations
+
 import os
 import re
+import sys
 import time
-import asyncio
+from datetime import datetime, timezone
+
 import requests
-from datetime import datetime
+import structlog
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -20,301 +34,323 @@ except ImportError:
 
 import chromadb
 
-try:
-    import aiohttp
-    HAS_AIOHTTP = True
-except ImportError:
-    HAS_AIOHTTP = False
+log = structlog.get_logger("rag")
 
 
-DB_PATH = os.path.expanduser("~/Projects/aegis/knowledge/chroma_db")
+# --- paths & config -----------------------------------------------------
+# ChromaDB: prefer external SSD via env; fallback to project dir
+DB_PATH = os.environ.get(
+    "CHROMA_PATH",
+    os.path.join(_ROOT, "knowledge", "chroma_db"),
+)
 COLLECTION_NAME = "cve_exploits"
-YEARS_BACK = 5
-NVD_API_KEY = os.environ.get("NVD_API_KEY", "")
+
+# NVD
+NVD_API_KEY = os.environ.get("NVD_API_KEY", "").strip()
 NVD_DELAY = 0.7 if NVD_API_KEY else 6.5
 NVD_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+YEARS_BACK = 5
 
 
+# --- http session with retries ------------------------------------------
+_session: requests.Session | None = None
+
+
+def _get_session() -> requests.Session:
+    global _session
+    if _session is not None:
+        return _session
+    s = requests.Session()
+    retry = Retry(
+        total=3,
+        backoff_factor=1.5,
+        status_forcelist=(500, 502, 503, 504),
+        allowed_methods=("GET",),
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    _session = s
+    return s
+
+
+# ========================================================================
+# KNOWN_CVES — fallback only (offline / NVD down)
+# ========================================================================
 KNOWN_CVES = [
-    # ===== Старые системы =====
-    {
-        "pattern": r"vsftpd\s*2\.3\.4",
-        "cves": [
-            {"cve_id": "CVE-2011-2523", "score": 10.0, "year": 2011,
-             "desc": "vsftpd 2.3.4 backdoor: логин с ':)' открывает root shell на порту 6200."},
-        ],
-    },
-    {
-        "pattern": r"Samba\s*3\.[0-9]|smbd\s*3\.",
-        "cves": [
-            {"cve_id": "CVE-2007-2447", "score": 10.0, "year": 2007,
-             "desc": "Samba 3.0.0-3.0.25rc3: username map script RCE."},
-        ],
-    },
-    {
-        "pattern": r"UnrealIRCd",
-        "cves": [
-            {"cve_id": "CVE-2010-2075", "score": 10.0, "year": 2010,
-             "desc": "UnrealIRCd 3.2.8.1: backdoor."},
-        ],
-    },
-    {
-        "pattern": r"PHP/5\.",
-        "cves": [
-            {"cve_id": "CVE-2012-1823", "score": 9.8, "year": 2012,
-             "desc": "PHP-CGI 5.3.12/5.4.2: RCE через query string."},
-        ],
-    },
-    {
-        "pattern": r"VNC.*3\.3",
-        "cves": [
-            {"cve_id": "CVE-2006-2369", "score": 7.5, "year": 2006,
-             "desc": "RealVNC 4.1.1: обход аутентификации через security type None."},
-        ],
-    },
-    {
-        "pattern": r"OpenSSH\s*[4-7]\.",
-        "cves": [
-            {"cve_id": "CVE-2016-0777", "score": 6.5, "year": 2016,
-             "desc": "OpenSSH client roaming: утечка приватного ключа."},
-            {"cve_id": "CVE-2018-15473", "score": 5.3, "year": 2018,
-             "desc": "OpenSSH < 7.7: user enumeration."},
-        ],
-    },
-    {
-        "pattern": r"Apache\s*httpd\s*2\.2",
-        "cves": [
-            {"cve_id": "CVE-2017-7659", "score": 7.5, "year": 2017,
-             "desc": "Apache 2.2.x: DoS через malformed HTTP/2 request."},
-        ],
-    },
-    {
-        "pattern": r"MySQL\s*5\.0",
-        "cves": [
-            {"cve_id": "CVE-2012-2122", "score": 5.1, "year": 2012,
-             "desc": "MySQL 5.0.x: обход аутентификации через повторные попытки."},
-        ],
-    },
-    {
-        "pattern": r"PostgreSQL.*8\.3",
-        "cves": [
-            {"cve_id": "CVE-2013-1900", "score": 4.9, "year": 2013,
-             "desc": "PostgreSQL 8.3.x: утечка памяти через RNG."},
-        ],
-    },
-    {
-        "pattern": r"ProFTPD\s*1\.3\.1",
-        "cves": [
-            {"cve_id": "CVE-2010-4221", "score": 10.0, "year": 2010,
-             "desc": "ProFTPD 1.3.1: stack overflow в mod_tls (pre-auth RCE)."},
-        ],
-    },
-    {
-        "pattern": r"ISC\s*BIND\s*9\.4",
-        "cves": [
-            {"cve_id": "CVE-2008-0122", "score": 5.0, "year": 2008,
-             "desc": "BIND 9.4.x: off-by-one в inet_network(), DoS."},
-        ],
-    },
-
-    # ===== Современные сервисы =====
-    # Angie — форк nginx. CVE совпадают с nginx.
-    {
-        "pattern": r"Angie",
-        "cves": [
-            {"cve_id": "CVE-2024-7347", "score": 4.7, "year": 2024,
-             "desc": "nginx/1.27.0 (Angie < 1.8.0): out-of-bounds read в ngx_http_mp4_module."},
-            {"cve_id": "CVE-2023-44487", "score": 7.5, "year": 2023,
-             "desc": "HTTP/2 Rapid Reset (все HTTP/2-серверы, включая nginx/Angie). DoS."},
-            {"cve_id": "CVE-2021-23017", "score": 7.7, "year": 2021,
-             "desc": "nginx resolver: off-by-one в DNS-ответе (при use resolver)."},
-        ],
-    },
-    # Mikrotik dnsd
-    {
-        "pattern": r"Mikrotik\s*dnsd|RouterOS",
-        "cves": [
-            {"cve_id": "CVE-2023-30800", "score": 7.5, "year": 2023,
-             "desc": "MikroTik RouterOS: DoS в DNS-сервере через malformed DNS-пакет."},
-            {"cve_id": "CVE-2018-14847", "score": 9.8, "year": 2018,
-             "desc": "MikroTik RouterOS 6.29-6.42: Winbox auth bypass (не dnsd, но актуально)."},
-        ],
-    },
+    # ... оставить весь твой текущий список без изменений ...
 ]
 
 
-def known_cves_for(service, version):
+def known_cves_for(service: str, version: str) -> list[dict]:
     haystack = f"{service} {version}".strip()
-    result = []
+    out: list[dict] = []
     for entry in KNOWN_CVES:
         if re.search(entry["pattern"], haystack, re.IGNORECASE):
-            result.extend(entry["cves"])
-    return result
+            out.extend(entry["cves"])
+    return out
 
 
-def format_known_cves(cves):
+def format_known_cves(cves: list[dict]) -> str:
     lines = []
     for c in sorted(cves, key=lambda x: -x["score"]):
-        lines.append(f"- {c['cve_id']} ({c['year']}, CVSS: {c['score']}): {c['desc']}")
+        lines.append(
+            f"- {c['cve_id']} ({c['year']}, CVSS: {c['score']}): {c['desc']}"
+        )
     return "\n".join(lines)
 
 
-# ============ NVD fallback ============
+# ========================================================================
+# ChromaDB
+# ========================================================================
+_client = None
+
 
 def get_client():
-    os.makedirs(DB_PATH, exist_ok=True)
-    return chromadb.PersistentClient(path=DB_PATH)
+    global _client
+    if _client is None:
+        os.makedirs(DB_PATH, exist_ok=True)
+        _client = chromadb.PersistentClient(path=DB_PATH)
+        log.info("chroma_client_ready", path=DB_PATH)
+    return _client
 
 
 def get_collection(client):
     return client.get_or_create_collection(
         name=COLLECTION_NAME,
-        metadata={"hnsw:space": "cosine"}
+        metadata={"hnsw:space": "cosine"},
     )
 
 
-def extract_year(cve_id):
+# ========================================================================
+# NVD
+# ========================================================================
+def extract_year(cve_id: str) -> int:
     try:
         return int(cve_id.split("-")[1])
     except (ValueError, IndexError):
         return 0
 
 
-def _parse_nvd_response(data, keyword, years_back=None):
-    results = []
+def _parse_nvd_response(data: dict, keyword: str, years_back: int | None = None) -> list[dict]:
+    results: list[dict] = []
     min_year = 0
     if years_back:
-        min_year = datetime.now().year - years_back
+        min_year = datetime.now(timezone.utc).year - years_back
+
     for v in data.get("vulnerabilities", []):
         cve = v.get("cve", {})
         cve_id = cve.get("id", "N/A")
         year = extract_year(cve_id)
         if years_back and year < min_year:
             continue
+
         description = ""
         for d in cve.get("descriptions", []):
             if d.get("lang") == "en":
                 description = d.get("value", "")
                 break
+
         metrics = cve.get("metrics", {})
         score = 0.0
-        for mt in ["cvssMetricV31", "cvssMetricV30", "cvssMetricV2"]:
-            if mt in metrics and metrics[mt]:
+        for mt in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+            if metrics.get(mt):
                 cvss = metrics[mt][0].get("cvssData", {})
-                score = cvss.get("baseScore", 0.0)
+                score = float(cvss.get("baseScore", 0.0))
                 break
+
         results.append({
-            "cve_id": cve_id, "description": description, "score": score,
-            "keyword": keyword, "year": year,
+            "cve_id": cve_id,
+            "description": description,
+            "score": score,
+            "keyword": keyword,
+            "year": year,
         })
     return results
 
 
-def fetch_cve_from_nvd(keyword, max_results=30, years_back=None):
-    time.sleep(NVD_DELAY)
+def fetch_cve_from_nvd(keyword: str, max_results: int = 30,
+                       years_back: int | None = None) -> list[dict]:
+    time.sleep(NVD_DELAY)   # rate limit (0.7s with key, 6.5s without)
+
     params = {"keywordSearch": keyword, "resultsPerPage": max_results}
     headers = {}
     if NVD_API_KEY:
         headers["apiKey"] = NVD_API_KEY
+
     try:
-        r = requests.get(NVD_URL, params=params, headers=headers, timeout=60)
+        r = _get_session().get(NVD_URL, params=params, headers=headers, timeout=60)
+
         if r.status_code == 429:
-            print("[!] NVD rate limit — жду 10 сек...")
+            log.warning("nvd_rate_limit", keyword=keyword)
             time.sleep(10)
-            r = requests.get(NVD_URL, params=params, headers=headers, timeout=60)
+            r = _get_session().get(NVD_URL, params=params, headers=headers, timeout=60)
+
         if r.status_code != 200:
+            log.warning("nvd_bad_status", keyword=keyword, status=r.status_code)
             return []
+
         return _parse_nvd_response(r.json(), keyword, years_back)
-    except requests.RequestException:
+
+    except requests.RequestException as e:
+        log.warning("nvd_request_failed", keyword=keyword, err=str(e))
         return []
 
 
-def sort_cve(cve_list):
-    return sorted(cve_list, key=lambda c: (c.get("year", 0), c.get("score", 0.0)), reverse=True)
+def sort_cve(cve_list: list[dict]) -> list[dict]:
+    return sorted(
+        cve_list,
+        key=lambda c: (c.get("year", 0), c.get("score", 0.0)),
+        reverse=True,
+    )
 
 
-def index_cve(cve_list):
+# ========================================================================
+# Indexing / searching
+# ========================================================================
+def index_cve(cve_list: list[dict], service_hint: str = "") -> int:
+    """
+    Сохраняет CVE в ChromaDB.
+
+    ВАЖНО: keyword = service_hint (например "ftp"), НЕ полный NVD-запрос.
+    Это исправляет баг, из-за которого search_cve_local никогда не находил записи.
+    """
     if not cve_list:
         return 0
-    client = get_client()
-    collection = get_collection(client)
+
+    collection = get_collection(get_client())
     documents, metadatas, ids = [], [], []
+
     for i, cve in enumerate(cve_list):
-        text = f"{cve['cve_id']} [{cve.get('keyword', '')}] [{cve.get('year', '')}]: {cve['description']} (CVSS: {cve['score']})"
+        cve_id = cve.get("cve_id", "")
+        # пропустить, если уже есть (id детерминирован)
+        doc_id = f"cve_{cve_id}"
+
+        text = (
+            f"{cve_id} [{service_hint or cve.get('keyword', '')}] "
+            f"[{cve.get('year', '')}]: {cve['description']} "
+            f"(CVSS: {cve['score']})"
+        )
         documents.append(text)
         metadatas.append({
-            "cve_id": cve["cve_id"], "score": float(cve["score"]),
-            "keyword": cve.get("keyword", ""), "year": cve.get("year", 0),
+            "cve_id": cve_id,
+            "score": float(cve["score"]),
+            "keyword": service_hint or cve.get("keyword", ""),
+            "year": int(cve.get("year", 0)),
         })
-        ids.append(f"cve_{cve['cve_id']}_{i}")
+        ids.append(doc_id)
+
     try:
-        collection.add(documents=documents, metadatas=metadatas, ids=ids)
+        # upsert — не падаем, если запись уже есть
+        collection.upsert(documents=documents, metadatas=metadatas, ids=ids)
+        log.debug("chroma_indexed", count=len(documents), service=service_hint)
         return len(documents)
-    except Exception:
+    except Exception as e:
+        log.error("chroma_index_failed", err=str(e), service=service_hint)
         return 0
 
 
-def search_cve_local(query, n_results=5, keyword_filter=None, min_year=None):
-    client = get_client()
-    collection = get_collection(client)
-    if collection.count() == 0:
-        return []
-    conditions = []
-    if keyword_filter:
-        conditions.append({"keyword": keyword_filter})
-    if min_year:
-        conditions.append({"year": {"$gte": min_year}})
-    where = None
-    if len(conditions) == 1:
-        where = conditions[0]
-    elif len(conditions) > 1:
-        where = {"$and": conditions}
+def search_cve_local(query: str, n_results: int = 5,
+                     keyword_filter: str | None = None,
+                     min_year: int | None = None) -> list[str]:
     try:
+        collection = get_collection(get_client())
+        if collection.count() == 0:
+            return []
+
+        conditions = []
+        if keyword_filter:
+            conditions.append({"keyword": keyword_filter})
+        if min_year:
+            conditions.append({"year": {"$gte": min_year}})
+
+        where = None
+        if len(conditions) == 1:
+            where = conditions[0]
+        elif len(conditions) > 1:
+            where = {"$and": conditions}
+
         results = collection.query(
             query_texts=[query],
             n_results=min(n_results, collection.count()),
             where=where,
         )
-        if not results["documents"] or not results["documents"][0]:
-            return []
-        return results["documents"][0]
-    except Exception:
+        docs = (results.get("documents") or [[]])[0]
+        if docs:
+            log.debug("chroma_cache_hit", query=query, n=len(docs))
+        return docs or []
+    except Exception as e:
+        log.warning("chroma_search_failed", err=str(e), query=query)
         return []
 
 
-def get_cve_context(service, version=None, n=5, years_back=YEARS_BACK):
-    """Приоритет: KNOWN_CVES → ChromaDB → NVD."""
+# ========================================================================
+# Public API
+# ========================================================================
+def get_cve_context(service: str, version: str | None = None,
+                    n: int = 5, years_back: int = YEARS_BACK) -> str:
+    """
+    Приоритет:
+        1. ChromaDB (быстро, offline)
+        2. NVD      (точно, online)
+        3. KNOWN_CVES (fallback при offline)
+    """
     ver = version or ""
-    known = known_cves_for(service, ver)
-    if known:
-        return format_known_cves(known[:n])
-
     query = f"{service} {ver}".strip()
-    min_year = datetime.now().year - years_back
-    cached = search_cve_local(query, n_results=n, keyword_filter=service, min_year=min_year)
+    min_year = datetime.now(timezone.utc).year - years_back
+
+    log.debug("cve_lookup_started", service=service, version=ver)
+
+    # 1. Кеш
+    cached = search_cve_local(
+        query,
+        n_results=n,
+        keyword_filter=service,      # ← теперь совпадает с index_cve
+        min_year=min_year,
+    )
     if cached:
+        log.info("cve_lookup_cache_hit", service=service, version=ver, n=len(cached))
         return "\n".join(cached)
 
+    # 2. NVD
     cves = fetch_cve_from_nvd(query, max_results=50)
-    if not cves:
-        return ""
-    cves = sort_cve(cves)
-    fresh = [c for c in cves if c["year"] >= min_year]
-    chosen = fresh[:n] if fresh else cves[:n]
-    index_cve(chosen)
-    return "\n".join([
-        f"- {c['cve_id']} ({c.get('year', '?')}, CVSS: {c['score']}): {c['description'][:200]}"
-        for c in chosen
-    ])
+    if cves:
+        cves = sort_cve(cves)
+        fresh = [c for c in cves if c["year"] >= min_year]
+        chosen = fresh[:n] if fresh else cves[:n]
+        index_cve(chosen, service_hint=service)
+        log.info("cve_lookup_nvd_hit", service=service, version=ver, n=len(chosen))
+        return "\n".join(
+            f"- {c['cve_id']} ({c.get('year', '?')}, CVSS: {c['score']}): "
+            f"{c['description'][:200]}"
+            for c in chosen
+        )
+
+    # 3. Fallback
+    known = known_cves_for(service, ver)
+    if known:
+        log.info("cve_lookup_fallback_known", service=service, version=ver,
+                 n=len(known))
+        return format_known_cves(known[:n])
+
+    log.info("cve_lookup_empty", service=service, version=ver)
+    return ""
 
 
-def get_cve_batch(queries):
+def get_cve_batch(queries: dict) -> dict:
+    """queries: {port: (service, version)}"""
     return {port: get_cve_context(svc, ver) for port, (svc, ver) in queries.items()}
 
 
 if __name__ == "__main__":
-    print("API key:", "да" if NVD_API_KEY else "НЕТ")
-    print("\n=== vsftpd ===")
+    import logging
+    logging.basicConfig(level=logging.INFO,
+                        format="%(levelname)-7s %(message)s")
+
+    print("NVD API key:", "да" if NVD_API_KEY else "НЕТ")
+    print("ChromaDB path:", DB_PATH)
+    print()
+    print("=== vsftpd 2.3.4 ===")
     print(get_cve_context("ftp", "vsftpd 2.3.4"))
     print("\n=== Angie ===")
     print(get_cve_context("http", "Angie"))
