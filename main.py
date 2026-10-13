@@ -164,7 +164,8 @@ def _run_exploitation(target: str, data: dict, auto_yes: bool) -> list:
 
     data["evidence"] = loot.get("evidence", {})
     data["evidence"]["target"] = target
-
+    data["evidence"]["id_out"] = loot.get("id_out", "")
+    
     # --- Cracker ---
     if loot.get("shadow_path") and os.path.exists(loot["shadow_path"]):
         with open(loot["shadow_path"]) as f:
