@@ -21,6 +21,7 @@ from modules.recon import (
     run_hydra_ssh, run_hydra_ftp, run_hydra_mysql,
     run_wpscan, run_enum4linux, run_commix,
     run_nuclei,
+    run_ftp_check, format_ftp_summary,
 )
 
 ENABLE_BRUTEFORCE = os.environ.get("AEGIS_BRUTEFORCE", "0") == "1"
@@ -133,10 +134,13 @@ def full_analysis(target, quiet=False):
         port, svc = p["port"], p["service"]
         res = {}
 
-        if port == 21:
-            res["nc"] = run_nc(target, port)
-            if ENABLE_BRUTEFORCE:
-                res["hydra_ftp"] = run_hydra_ftp(target, port)
+       # СТАЛО:
+    if port == 21:
+        ftp_result = run_ftp_check(target, port)
+        res["ftp"] = format_ftp_summary(ftp_result)
+        res["ftp_structured"] = ftp_result       # пригодится для script_gen / exploit
+        if ENABLE_BRUTEFORCE:
+            res["hydra_ftp"] = run_hydra_ftp(target, port)
 
         elif port == 22:
             res["nc"] = run_nc(target, port)
