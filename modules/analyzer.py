@@ -3,10 +3,6 @@
 LLM interface to Ollama.
 
 Uses /api/chat (system+user roles) instead of /api/generate (single prompt).
-Routes by difficulty:
-    easy   → 7B
-    normal → 7B
-    hard   → 14B (falls back to default if 14B not pulled)
 """
 from __future__ import annotations
 
@@ -38,9 +34,9 @@ else:
 
 # --- routing table ------------------------------------------------------
 _ROUTE = {
-    "easy":   "7b",
-    "normal": "7b",
-    "hard":   "14b",
+    "easy":   "fast",
+    "normal": "fast",
+    "hard":   "main",
 }
 
 # --- timeouts -----------------------------------------------------------
