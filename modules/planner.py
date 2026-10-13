@@ -10,15 +10,6 @@ log = structlog.get_logger("planner")
 def full_analysis_multi(targets, max_workers=1):
     """
     Multi-target анализ.
-
-    max_workers=1 (рекомендуется для 18 ГБ RAM):
-        цели обрабатываются последовательно.
-    max_workers>1 (только если RAM хватает):
-        параллельно через ThreadPoolExecutor.
-        ВНИМАНИЕ: Ollama сериализует LLM-вызовы, так что
-        параллелизм даёт выигрыш только на этапе nmap/nuclei.
-
-    Все цели, не входящие в whitelist, пропускаются с логом.
     """
     # --- 1. фильтр whitelist ---
     safe = [t for t in targets if is_whitelisted(t)]
