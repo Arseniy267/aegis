@@ -5,8 +5,11 @@ import os
 import re
 import hashlib
 import time
+import structlog
+log = structlog.get_logger("planner")
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
