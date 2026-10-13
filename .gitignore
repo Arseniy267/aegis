@@ -13,6 +13,16 @@ env/
 
 # Секреты
 .env
+.env.*
+!.env.example
+logs/
+reports/
+loot/
+chroma.sqlite3
+data_level0.bin
+header.bin
+length.bin
+link_lists.bin
 *.log
 
 # Большие файлы (заливаются отдельно, если нужно)
