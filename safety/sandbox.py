@@ -1,248 +1,248 @@
-# scripts/test_sandbox.py — smoke tests for safety/sandbox.py
+# safety/sandbox.py — Docker-based isolated PoC runner (v2)
 """
-Runs a battery of tests to verify sandbox isolation.
+Runs PoC scripts in an isolated Docker container.
 
-Tests:
-    1. hello world + env       — базовая работа
-    2. read-only FS            — нельзя писать в /
-    3. tmpfs writable          — можно писать в /tmp
-    4. DNS blocked             — нет резолва доменов
-    5. no root                 — нельзя sudo/su
-    6. resource limits         — timeout срабатывает
-    7. reach target (optional) — если target доступен
+Isolation:
+    - read-only rootfs, only /tmp writable
+    - non-root user (uid 1000)
+    - no new privileges, all caps dropped
+    - 256 MB RAM, 1 CPU, 64 PIDs
+    - DNS disabled (--dns 127.0.0.1) — cannot resolve domains
+    - timeout enforced by subprocess + docker kill
 
-Usage:
-    python scripts/test_sandbox.py --target 192.168.64.7
-    python scripts/test_sandbox.py --target dvwa
+NOT isolated (by design, MVP):
+    - container can reach target IP over bridge network
+    - no egress firewall — will be added in v3 with iptables-sidecar
+
+Prerequisite:
+    docker build -f docker/sandbox.Dockerfile -t aegis-sandbox:latest .
 """
 from __future__ import annotations
 
-import argparse
-import json
 import os
-import sys
+import subprocess
+import tempfile
 import time
+import uuid
 from dataclasses import dataclass
-from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parent.parent
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
+import structlog
 
-from safety.sandbox import run_in_sandbox, SandboxResult
+log = structlog.get_logger("sandbox")
+
+# --- config --------------------------------------------------------------
+SANDBOX_IMAGE = os.environ.get("AEGIS_SANDBOX_IMAGE", "aegis-sandbox:latest")
+NETWORK_NAME = os.environ.get("AEGIS_SANDBOX_NETWORK", "aegis-sandbox")
+
+MEMORY_LIMIT = "256m"
+CPU_LIMIT = "1.0"
+PIDS_LIMIT = "64"
+TMPFS_SIZE = "32m"
+DEFAULT_TIMEOUT = 60
 
 
-# ============================================================================
-# Test harness
-# ============================================================================
+# --- result model --------------------------------------------------------
 @dataclass
-class TestCase:
-    name: str
-    script: str
-    timeout: int = 30
-    port: int | None = None
-    check_ok: callable = None       # fn(SandboxResult) -> bool
-    expect_contains: list[str] = None
-    expect_not_contains: list[str] = None
-    optional: bool = False
+class SandboxResult:
+    exit_code: int
+    stdout: str
+    stderr: str
+    timed_out: bool = False
+    error: str | None = None
+    container_name: str | None = None
+    duration_s: float = 0.0
+
+    @property
+    def success(self) -> bool:
+        return self.exit_code == 0 and not self.timed_out and not self.error
+
+    def to_dict(self) -> dict:
+        return {
+            "exit_code": self.exit_code,
+            "stdout": self.stdout,
+            "stderr": self.stderr,
+            "timed_out": self.timed_out,
+            "error": self.error,
+            "success": self.success,
+            "duration_s": self.duration_s,
+        }
 
 
-def _check(*contains: str, forbid: list[str] = None):
-    forbid = forbid or []
-    def _f(r: SandboxResult) -> bool:
-        blob = (r.stdout + "\n" + r.stderr)
-        for c in contains:
-            if c not in blob:
-                return False
-        for f in forbid:
-            if f in blob:
-                return False
-        return True
-    return _f
+# --- helpers -------------------------------------------------------------
+def _docker_available() -> bool:
+    try:
+        r = subprocess.run(
+            ["docker", "info"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return r.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
 
 
-TESTS: list[TestCase] = [
-    TestCase(
-        name="01. hello world + env vars",
-        script="""
-import os
-print("TARGET=" + os.environ.get("TARGET", "MISSING"))
-print("PORT=" + os.environ.get("TARGET_PORT", "NONE"))
-print("hello from sandbox")
-""",
-        check_ok=_check("hello from sandbox", "TARGET=", "PORT="),
-    ),
-
-    TestCase(
-        name="02. root filesystem is read-only",
-        script="""
-try:
-    with open("/evil.txt", "w") as f:
-        f.write("x")
-    print("WRITE_SUCCEEDED_NOT_ISOLATED")
-except Exception as e:
-    print("WRITE_BLOCKED: " + type(e).__name__)
-""",
-        check_ok=_check("WRITE_BLOCKED", forbid=["WRITE_SUCCEEDED_NOT_ISOLATED"]),
-    ),
-
-    TestCase(
-        name="03. /tmp is writable (tmpfs)",
-        script="""
-try:
-    with open("/tmp/ok.txt", "w") as f:
-        f.write("works")
-    with open("/tmp/ok.txt") as f:
-        print("TMP_READ_BACK=" + f.read())
-except Exception as e:
-    print("TMP_FAILED: " + type(e).__name__)
-""",
-        check_ok=_check("TMP_READ_BACK=works"),
-    ),
-
-    TestCase(
-        name="04. DNS resolution blocked",
-        script="""
-import socket
-try:
-    ip = socket.gethostbyname("google.com")
-    print("DNS_WORKS_NOT_ISOLATED ip=" + ip)
-except Exception as e:
-    print("DNS_BLOCKED: " + type(e).__name__)
-""",
-        check_ok=_check("DNS_BLOCKED", forbid=["DNS_WORKS_NOT_ISOLATED"]),
-    ),
-
-    TestCase(
-        name="05. running as non-root uid 1000",
-        script="""
-import os
-print("UID=" + str(os.getuid()))
-print("USER=" + os.environ.get("USER", "?"))
-""",
-        check_ok=_check("UID=1000"),
-    ),
-
-    TestCase(
-        name="06. timeout enforced",
-        script="""
-import time
-print("sleeping...", flush=True)
-time.sleep(120)
-print("NEVER_REACHED")
-""",
-        timeout=5,
-        check_ok=lambda r: r.timed_out and r.duration_s < 15,
-    ),
-]
+def _ensure_network() -> None:
+    r = subprocess.run(
+        ["docker", "network", "inspect", NETWORK_NAME],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        subprocess.run(
+            ["docker", "network", "create",
+             "--driver", "bridge",
+             NETWORK_NAME],
+            check=True, capture_output=True,
+        )
+        log.info("sandbox_network_created", network=NETWORK_NAME)
 
 
-# ============================================================================
-# Runner
-# ============================================================================
-def _fmt_status(ok: bool, optional: bool = False) -> str:
-    if ok:
-        return "[ PASS ]"
-    if optional:
-        return "[ SKIP ]"
-    return "[ FAIL ]"
-
-
-def _short(s: str, n: int = 200) -> str:
-    s = s.strip().replace("\n", " | ")
-    return s if len(s) <= n else s[:n] + "..."
-
-
-def run_test(tc: TestCase, target: str, verbose: bool) -> tuple[bool, SandboxResult]:
-    print(f"\n{'-'*72}")
-    print(f"  {tc.name}")
-    print(f"{'-'*72}")
-
-    result = run_in_sandbox(
-        script=tc.script,
-        target_ip=target,
-        target_port=tc.port,
-        timeout=tc.timeout,
+def _kill_container(name: str) -> None:
+    subprocess.run(
+        ["docker", "kill", name],
+        capture_output=True,
     )
 
-    if verbose:
-        print(f"  exit_code:   {result.exit_code}")
-        print(f"  timed_out:   {result.timed_out}")
-        print(f"  duration_s:  {result.duration_s}")
-        if result.error:
-            print(f"  error:       {result.error}")
-        if result.stdout:
-            print(f"  stdout:      {_short(result.stdout, 400)}")
-        if result.stderr:
-            print(f"  stderr:      {_short(result.stderr, 400)}")
-    else:
-        print(f"  duration: {result.duration_s}s  exit: {result.exit_code}  "
-              f"timeout: {result.timed_out}")
 
-    ok = False
-    if tc.check_ok is not None:
+# --- public API ----------------------------------------------------------
+def run_in_sandbox(
+    script: str,
+    target_ip: str,
+    target_port: int | None = None,
+    timeout: int = DEFAULT_TIMEOUT,
+    extra_env: dict[str, str] | None = None,
+) -> SandboxResult:
+    """Запускает Python-скрипт в изолированном контейнере."""
+    t0 = time.time()
+
+    if not _docker_available():
+        log.error("docker_unavailable")
+        return SandboxResult(
+            exit_code=-1, stdout="", stderr="",
+            error="docker daemon not available",
+        )
+
+    _ensure_network()
+    container_name = f"aegis-sbx-{uuid.uuid4().hex[:8]}"
+
+    # проверка образа
+    check = subprocess.run(
+        ["docker", "image", "inspect", SANDBOX_IMAGE],
+        capture_output=True, text=True,
+    )
+    if check.returncode != 0:
+        log.error("sandbox_image_missing", image=SANDBOX_IMAGE)
+        return SandboxResult(
+            exit_code=-1, stdout="", stderr="",
+            error=f"image '{SANDBOX_IMAGE}' not found. "
+                  f"Build: docker build -f docker/sandbox.Dockerfile -t {SANDBOX_IMAGE} .",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="aegis-sbx-") as tmpdir:
+        script_path = os.path.join(tmpdir, "poc.py")
+        with open(script_path, "w", encoding="utf-8") as f:
+            f.write(script)
+        os.chmod(script_path, 0o644)
+
+        cmd = [
+            "docker", "run", "--rm",
+            "--name", container_name,
+            "--network", NETWORK_NAME,
+            "--add-host", f"target:{target_ip}",
+            "--dns", "127.0.0.1",
+            "--memory", MEMORY_LIMIT,
+            "--memory-swap", MEMORY_LIMIT,
+            "--cpus", CPU_LIMIT,
+            "--pids-limit", PIDS_LIMIT,
+            "--read-only",
+            "--tmpfs", f"/tmp:rw,size={TMPFS_SIZE},noexec,nosuid",
+            "--user", "1000:1000",
+            "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges",
+            "-v", f"{script_path}:/poc.py:ro",
+            "-e", f"TARGET={target_ip}",
+            "-e", "PYTHONUNBUFFERED=1",
+        ]
+        if target_port:
+            cmd += ["-e", f"TARGET_PORT={target_port}"]
+        if extra_env:
+            for k, v in extra_env.items():
+                cmd += ["-e", f"{k}={v}"]
+
+        cmd += [SANDBOX_IMAGE, "python", "/poc.py"]
+
+        log.info(
+            "sandbox_run_started",
+            target=target_ip, port=target_port,
+            timeout=timeout, container=container_name,
+        )
+
         try:
-            ok = bool(tc.check_ok(result))
+            r = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout,
+            )
+            dur = round(time.time() - t0, 2)
+            result = SandboxResult(
+                exit_code=r.returncode,
+                stdout=(r.stdout or "")[-16000:],
+                stderr=(r.stderr or "")[-8000:],
+                container_name=container_name,
+                duration_s=dur,
+            )
+            log.info("sandbox_run_done",
+                     target=target_ip, exit=result.exit_code, duration_s=dur)
+            return result
+
+        except subprocess.TimeoutExpired:
+            _kill_container(container_name)
+            dur = round(time.time() - t0, 2)
+            log.warning("sandbox_timeout",
+                        target=target_ip, timeout=timeout, duration_s=dur)
+            return SandboxResult(
+                exit_code=-1, stdout="", stderr="",
+                timed_out=True, container_name=container_name,
+                duration_s=dur,
+            )
+
         except Exception as e:
-            print(f"  check raised: {e}")
-            ok = False
+            _kill_container(container_name)
+            log.exception("sandbox_run_failed", target=target_ip)
+            return SandboxResult(
+                exit_code=-1, stdout="", stderr="",
+                error=str(e), container_name=container_name,
+                duration_s=round(time.time() - t0, 2),
+            )
 
-    print(f"  → {_fmt_status(ok, tc.optional)}")
-    return ok, result
 
+# --- CLI --------------------------------------------------------------
+def _main() -> int:
+    import argparse
+    import json
+    import logging
 
-def main() -> int:
-    p = argparse.ArgumentParser(description="Sandbox smoke tests")
-    p.add_argument("--target", default="127.0.0.1",
-                   help="target IP or hostname (used as env TARGET)")
+    p = argparse.ArgumentParser(description="AEGIS sandbox test runner")
+    p.add_argument("target", help="target IP")
+    p.add_argument("script", help="path to .py file to run")
+    p.add_argument("--port", type=int)
+    p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     p.add_argument("-v", "--verbose", action="store_true")
-    p.add_argument("--json", action="store_true",
-                   help="dump results as JSON at the end")
     args = p.parse_args()
 
-    print()
-    print("=" * 72)
-    print(f"  AEGIS sandbox smoke tests")
-    print(f"  target: {args.target}")
-    print(f"  python: {sys.version.split()[0]}  platform: {sys.platform}")
-    print("=" * 72)
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(levelname)-7s %(name)s: %(message)s",
+    )
 
-    t0 = time.time()
-    results: list[dict] = []
-    n_pass = n_fail = n_skip = 0
+    with open(args.script, encoding="utf-8") as f:
+        script = f.read()
 
-    for tc in TESTS:
-        ok, r = run_test(tc, args.target, args.verbose)
-        if ok:
-            n_pass += 1
-        elif tc.optional:
-            n_skip += 1
-        else:
-            n_fail += 1
-        results.append({
-            "name": tc.name,
-            "ok": ok,
-            "optional": tc.optional,
-            **r.to_dict(),
-        })
-
-    elapsed = round(time.time() - t0, 2)
-
-    print()
-    print("=" * 72)
-    print(f"  SUMMARY  |  pass: {n_pass}  fail: {n_fail}  skip: {n_skip}  "
-          f"|  total: {elapsed}s")
-    print("=" * 72)
-
-    if args.json:
-        out = _ROOT / "logs" / "sandbox_test_results.json"
-        out.parent.mkdir(exist_ok=True)
-        with open(out, "w", encoding="utf-8") as f:
-            json.dump(results, f, indent=2, ensure_ascii=False)
-        print(f"  JSON: {out}")
-
-    return 0 if n_fail == 0 else 1
+    result = run_in_sandbox(
+        script=script,
+        target_ip=args.target,
+        target_port=args.port,
+        timeout=args.timeout,
+    )
+    print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+    return 0 if result.success else 1
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_main())
