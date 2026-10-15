@@ -24,7 +24,17 @@ import re
 from pathlib import Path
 from urllib.parse import urlparse
 
-log = logging.getLogger(__name__)
+try:
+    from dotenv import load_dotenv
+    _PROJECT_ROOT = Path(__file__).resolve().parent.parent
+    load_dotenv(_PROJECT_ROOT / ".env")
+except ImportError:
+    pass
+
+import structlog
+
+log = structlog.get_logger("whitelist")
+
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _ENV_VAR = "WHITELIST"
