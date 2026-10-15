@@ -1,27 +1,30 @@
-# safety/sandbox.py — Docker-based isolated PoC runner (v2)
+# safety/sandbox.py — Docker-based isolated PoC runner (v4)
 """
 Runs PoC scripts in an isolated Docker container.
 
+PoC code is passed via stdin (docker run -i --entrypoint python ... -),
+NOT via bind mount. This avoids Windows Docker Desktop ACL issues
+and WSL2 /mnt issues with non-C: drives.
+
 Isolation:
-    - read-only rootfs, only /tmp writable
+    - read-only rootfs, only /tmp writable (tmpfs)
     - non-root user (uid 1000)
     - no new privileges, all caps dropped
     - 256 MB RAM, 1 CPU, 64 PIDs
-    - DNS disabled (--dns 127.0.0.1) — cannot resolve domains
+    - DNS disabled (--dns 127.0.0.1)
     - timeout enforced by subprocess + docker kill
 
 NOT isolated (by design, MVP):
-    - container can reach target IP over bridge network
-    - no egress firewall — will be added in v3 with iptables-sidecar
+    - container can reach target IP over the bridge network
 
 Prerequisite:
     docker build -f docker/sandbox.Dockerfile -t aegis-sandbox:latest .
+    docker network create aegis-sandbox
 """
 from __future__ import annotations
 
 import os
 import subprocess
-import tempfile
 import time
 import uuid
 from dataclasses import dataclass
@@ -29,6 +32,7 @@ from dataclasses import dataclass
 import structlog
 
 log = structlog.get_logger("sandbox")
+
 
 # --- config --------------------------------------------------------------
 SANDBOX_IMAGE = os.environ.get("AEGIS_SANDBOX_IMAGE", "aegis-sandbox:latest")
@@ -70,6 +74,7 @@ class SandboxResult:
 
 # --- helpers -------------------------------------------------------------
 def _docker_available() -> bool:
+    """Проверяет, что docker daemon запущен. Без input, без encoding."""
     try:
         r = subprocess.run(
             ["docker", "info"],
@@ -96,10 +101,7 @@ def _ensure_network() -> None:
 
 
 def _kill_container(name: str) -> None:
-    subprocess.run(
-        ["docker", "kill", name],
-        capture_output=True,
-    )
+    subprocess.run(["docker", "kill", name], capture_output=True)
 
 
 # --- public API ----------------------------------------------------------
@@ -110,7 +112,12 @@ def run_in_sandbox(
     timeout: int = DEFAULT_TIMEOUT,
     extra_env: dict[str, str] | None = None,
 ) -> SandboxResult:
-    """Запускает Python-скрипт в изолированном контейнере."""
+    """
+    Запускает Python-скрипт в изолированном контейнере.
+
+    Скрипт передаётся через stdin (python -). Никаких bind mounts.
+    --entrypoint python переопределяет ENTRYPOINT из образа.
+    """
     t0 = time.time()
 
     if not _docker_available():
@@ -132,87 +139,91 @@ def run_in_sandbox(
         log.error("sandbox_image_missing", image=SANDBOX_IMAGE)
         return SandboxResult(
             exit_code=-1, stdout="", stderr="",
-            error=f"image '{SANDBOX_IMAGE}' not found. "
-                  f"Build: docker build -f docker/sandbox.Dockerfile -t {SANDBOX_IMAGE} .",
+            error=(f"image '{SANDBOX_IMAGE}' not found. "
+                   f"Build: docker build -f docker/sandbox.Dockerfile "
+                   f"-t {SANDBOX_IMAGE} ."),
         )
 
-    with tempfile.TemporaryDirectory(prefix="aegis-sbx-") as tmpdir:
-        script_path = os.path.join(tmpdir, "poc.py")
-        with open(script_path, "w", encoding="utf-8") as f:
-            f.write(script)
-        os.chmod(script_path, 0o644)
+    cmd = [
+        "docker", "run", "--rm", "-i",
+        "--name", container_name,
+        "--entrypoint", "python",
+        "--network", NETWORK_NAME,
+        "--add-host", f"target:{target_ip}",
+        "--dns", "127.0.0.1",
+        "--memory", MEMORY_LIMIT,
+        "--memory-swap", MEMORY_LIMIT,
+        "--cpus", CPU_LIMIT,
+        "--pids-limit", PIDS_LIMIT,
+        "--read-only",
+        "--tmpfs", f"/tmp:rw,size={TMPFS_SIZE},noexec,nosuid",
+        "--user", "1000:1000",
+        "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges",
+        "-e", f"TARGET={target_ip}",
+        "-e", "PYTHONUNBUFFERED=1",
+        "-e", "PYTHONIOENCODING=utf-8",
+        "-e", "LANG=C.UTF-8",
+    ]
+    if target_port:
+        cmd += ["-e", f"TARGET_PORT={target_port}"]
+    if extra_env:
+        for k, v in extra_env.items():
+            cmd += ["-e", f"{k}={v}"]
 
-        cmd = [
-            "docker", "run", "--rm",
-            "--name", container_name,
-            "--network", NETWORK_NAME,
-            "--add-host", f"target:{target_ip}",
-            "--dns", "127.0.0.1",
-            "--memory", MEMORY_LIMIT,
-            "--memory-swap", MEMORY_LIMIT,
-            "--cpus", CPU_LIMIT,
-            "--pids-limit", PIDS_LIMIT,
-            "--read-only",
-            "--tmpfs", f"/tmp:rw,size={TMPFS_SIZE},noexec,nosuid",
-            "--user", "1000:1000",
-            "--cap-drop", "ALL",
-            "--security-opt", "no-new-privileges",
-            "-v", f"{script_path}:/poc.py:ro",
-            "-e", f"TARGET={target_ip}",
-            "-e", "PYTHONUNBUFFERED=1",
-        ]
-        if target_port:
-            cmd += ["-e", f"TARGET_PORT={target_port}"]
-        if extra_env:
-            for k, v in extra_env.items():
-                cmd += ["-e", f"{k}={v}"]
+    # python читает скрипт из stdin ("-")
+    cmd += [SANDBOX_IMAGE, "-"]
 
-        cmd += [SANDBOX_IMAGE, "python", "/poc.py"]
+    log.info(
+        "sandbox_run_started",
+        target=target_ip, port=target_port,
+        timeout=timeout, container=container_name,
+    )
 
-        log.info(
-            "sandbox_run_started",
-            target=target_ip, port=target_port,
-            timeout=timeout, container=container_name,
+    try:
+        r = subprocess.run(
+            cmd,
+            input=script,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+        dur = round(time.time() - t0, 2)
+        result = SandboxResult(
+            exit_code=r.returncode,
+            stdout=(r.stdout or "")[-16000:],
+            stderr=(r.stderr or "")[-8000:],
+            container_name=container_name,
+            duration_s=dur,
+        )
+        log.info("sandbox_run_done",
+                 target=target_ip, exit=result.exit_code, duration_s=dur)
+        return result
+
+    except subprocess.TimeoutExpired:
+        _kill_container(container_name)
+        dur = round(time.time() - t0, 2)
+        log.warning("sandbox_timeout",
+                    target=target_ip, timeout=timeout, duration_s=dur)
+        return SandboxResult(
+            exit_code=-1, stdout="", stderr="",
+            timed_out=True, container_name=container_name,
+            duration_s=dur,
         )
 
-        try:
-            r = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout,
-            )
-            dur = round(time.time() - t0, 2)
-            result = SandboxResult(
-                exit_code=r.returncode,
-                stdout=(r.stdout or "")[-16000:],
-                stderr=(r.stderr or "")[-8000:],
-                container_name=container_name,
-                duration_s=dur,
-            )
-            log.info("sandbox_run_done",
-                     target=target_ip, exit=result.exit_code, duration_s=dur)
-            return result
-
-        except subprocess.TimeoutExpired:
-            _kill_container(container_name)
-            dur = round(time.time() - t0, 2)
-            log.warning("sandbox_timeout",
-                        target=target_ip, timeout=timeout, duration_s=dur)
-            return SandboxResult(
-                exit_code=-1, stdout="", stderr="",
-                timed_out=True, container_name=container_name,
-                duration_s=dur,
-            )
-
-        except Exception as e:
-            _kill_container(container_name)
-            log.exception("sandbox_run_failed", target=target_ip)
-            return SandboxResult(
-                exit_code=-1, stdout="", stderr="",
-                error=str(e), container_name=container_name,
-                duration_s=round(time.time() - t0, 2),
-            )
+    except Exception as e:
+        _kill_container(container_name)
+        log.exception("sandbox_run_failed", target=target_ip)
+        return SandboxResult(
+            exit_code=-1, stdout="", stderr="",
+            error=str(e), container_name=container_name,
+            duration_s=round(time.time() - t0, 2),
+        )
 
 
-# --- CLI --------------------------------------------------------------
+# --- CLI -----------------------------------------------------------------
 def _main() -> int:
     import argparse
     import json
