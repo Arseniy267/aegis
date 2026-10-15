@@ -21,17 +21,6 @@ from config import OLLAMA_CHAT_URL, MODELS, DEFAULT_MODEL, SYSTEM_PROMPT
 
 log = structlog.get_logger("analyzer")
 
-# --- derive chat endpoint -----------------------------------------------
-# OLLAMA_URL пример: "http://localhost:11434/api/generate"
-# Нам нужен:         "http://localhost:11434/api/chat"
-if OLLAMA_URL.endswith("/api/generate"):
-    OLLAMA_CHAT_URL = OLLAMA_URL[: -len("/api/generate")] + "/api/chat"
-elif OLLAMA_URL.endswith("/api/chat"):
-    OLLAMA_CHAT_URL = OLLAMA_URL
-else:
-    # на всякий случай
-    OLLAMA_CHAT_URL = OLLAMA_URL.rstrip("/") + "/api/chat"
-
 # --- routing table ------------------------------------------------------
 _ROUTE = {
     "easy":   "fast",
