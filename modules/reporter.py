@@ -1,17 +1,20 @@
-# Reporter — Markdown + PDF через pandoc (v6: fix evidence return)
+# modules/reporter.py — Markdown + PDF через pandoc (v6.1 fixed)
 
 import os
-import sys
 import re
 import structlog
 import subprocess
+import sys
 from datetime import datetime
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
-    
+
+REPORT_DIR = os.path.join(_ROOT, "reports")
+
 log = structlog.get_logger("reporter")
+
 
 LATEX_HEADER = r"""
 \usepackage{xcolor}
@@ -37,8 +40,10 @@ LATEX_HEADER = r"""
 def clean_text(text):
     if not text:
         return ""
-    text = re.sub(r'[^\x20-\x7E\u0400-\u04FF\u2010-\u2030\n\t]', '', text)
-    return text
+    return re.sub(
+        r'[^\x20-\x7E\u0400-\u04FF\u2000-\u206F\u2190-\u21FF\u2600-\u27BF\n\t]',
+        '', text
+    )
 
 
 def _cve_rows(data):
@@ -53,8 +58,6 @@ def _cve_rows(data):
             continue
 
         text = cves.get(port, "")
-
-        # парсим пары (id, score) из текста RAG
         pairs = []
         for line in text.splitlines():
             m_id = re.search(r"CVE-\d{4}-\d{4,}", line)
@@ -63,7 +66,6 @@ def _cve_rows(data):
                 sc = float(m_sc.group(1)) if m_sc else 0.0
                 pairs.append((m_id.group(0), sc))
 
-        # сортируем по score по убыванию, берём топ-3
         pairs.sort(key=lambda x: -x[1])
         seen = set()
         top_ids = []
@@ -80,10 +82,7 @@ def _cve_rows(data):
 
 
 def _evidence_section(data):
-    """
-    Только ДОКАЗАТЕЛЬСТВА: shell, команды, shadow, cracked creds.
-    НЕ содержит IMPACT — он вынесен в _impact_section.
-    """
+    """Только ДОКАЗАТЕЛЬСТВА: shell, команды, shadow, cracked creds."""
     ev = data.get("evidence") or {}
     if not ev:
         return ""
@@ -94,7 +93,6 @@ def _evidence_section(data):
     parts.append("\\textcolor{evidencegreen}{\\textbf{Ниже — реальные команды, "
                  "выполненные на целевой машине через полученный root shell.}}\n\n")
 
-    # --- подключение ---
     parts.append("## Соединение с целевой машиной\n\n")
     parts.append(f"**Target:** `{clean_text(ev.get('target', '—'))}`  \n")
     parts.append(f"**Shell:** `{clean_text(ev.get('shell', '—'))}`  \n")
@@ -102,12 +100,10 @@ def _evidence_section(data):
         parts.append(f"**Identity:** `{clean_text(ev['id_out'])}`  \n")
     parts.append(f"**Время:** `{clean_text(ev.get('timestamp', '—'))}`  \n\n")
 
-    # --- команды ---
     commands = ev.get("commands") or []
     if commands:
         parts.append("## Выполненные команды\n\n")
         for entry in commands:
-            # поддержка (label, cmd, out) и (cmd, out)
             if len(entry) == 3:
                 _label, cmd, out = entry
             elif len(entry) == 2:
@@ -119,14 +115,12 @@ def _evidence_section(data):
             parts.append(clean_text(out)[:1000])
             parts.append("\n```\n\n")
 
-    # --- shadow ---
     if ev.get("shadow_head"):
         parts.append("## Содержимое /etc/shadow (первые строки)\n\n")
         parts.append("```\n")
         parts.append(clean_text(ev["shadow_head"])[:800])
         parts.append("\n```\n\n")
 
-    # --- cracked creds ---
     if ev.get("cracked"):
         parts.append("## Взломанные учётные данные\n\n")
         parts.append("\\textcolor{aegisred}{\\textbf{КРИТИЧНО:}}\n\n")
@@ -136,6 +130,7 @@ def _evidence_section(data):
         parts.append("\n")
 
     return "".join(parts)
+
 
 def _risk_summary(data):
     ports = data.get("ports") or []
@@ -149,17 +144,15 @@ def _risk_summary(data):
     return (
         "\n## Сводка по критичности\n\n"
         "| Уровень | Портов |\n|---|---|\n"
-        f"| CRIT (≥9.0) | {crit} |\n"
-        f"| HIGH (7.0–8.9) | {high} |\n"
-        f"| MED (4.0–6.9) | {med} |\n"
+        f"| CRIT (>=9.0) | {crit} |\n"
+        f"| HIGH (7.0-8.9) | {high} |\n"
+        f"| MED (4.0-6.9) | {med} |\n"
         f"| LOW (<4.0) | {low} |\n\n"
     )
 
+
 def _impact_section(data, exploit_results=None):
-    """
-    IMPACT — генерируется из реальных находок.
-    Никаких хардкодов под Metasploitable (msfadmin, vsftpd, порт 6200).
-    """
+    """IMPACT — из реальных находок, без хардкодов."""
     ev = data.get("evidence") or {}
     cracked = ev.get("cracked") or []
     ports = data.get("ports") or []
@@ -169,7 +162,6 @@ def _impact_section(data, exploit_results=None):
     parts.append("\\newpage\n")
     parts.append("# IMPACT — Что злоумышленник мог бы сделать\n\n")
 
-    # --- уровень доступа ---
     id_out = (ev.get("id_out") or "").strip()
     is_root = "uid=0" in id_out or id_out.lower().startswith("root")
 
@@ -181,7 +173,6 @@ def _impact_section(data, exploit_results=None):
     else:
         parts.append("Эксплуатация дала доступ к системе:\n\n")
 
-    # --- что сработало ---
     successful = [r for r in exploit_results
                   if r.get("result", {}).get("success")]
     for r in successful:
@@ -190,7 +181,6 @@ def _impact_section(data, exploit_results=None):
                      f"(порт {r.get('port', '?')})\n")
     parts.append("\n")
 
-    # --- креды ---
     if cracked:
         parts.append("Взломаны учётные данные:\n\n")
         parts.append("| Пользователь | Пароль |\n|---|---|\n")
@@ -208,7 +198,6 @@ def _impact_section(data, exploit_results=None):
         parts.append("- Читать файлы конфигурации, БД и ключи\n")
         parts.append("- Использовать эту машину как точку pivot во внутреннюю сеть\n\n")
 
-    # --- рекомендации из реальных портов ---
     open_ports = {p["port"] for p in ports}
     svcs = {p.get("service", "").lower() for p in ports}
 
@@ -234,7 +223,6 @@ def _impact_section(data, exploit_results=None):
         recs.append("Web: закрыть admin-панели по IP-whitelist, "
                     "обновить серверы")
 
-    # универсальные
     recs.append("Сменить все дефолтные пароли")
     recs.append("Настроить firewall — закрыть неиспользуемые порты")
 
@@ -278,16 +266,17 @@ def _recommendations(data, ports):
 
     return "\n".join(f"{i+1}. {r}" for i, r in enumerate(recs))
 
+
 def generate_report(target, recon_data, analysis, scripts_results=None, ports=None,
                     data=None, exploit_results=None):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     date_slug = datetime.now().strftime("%Y%m%d_%H%M%S")
+    skip_pdf = os.environ.get("AEGIS_NO_PDF", "0") == "1"
 
-    skip_pdf = os.environ.get("AEGIS_NO_PDF", "0") == "1"      
-    
     analysis = clean_text(analysis)
     nmap_compressed = clean_text(recon_data.get("nmap_compressed", "нет данных"))
 
+    # ─── Шапка + секции 1-3 (f-string ЗАКРЫВАЕТСЯ после "# 3. CVE по сервисам") ───
     report = f"""---
 title: "AEGIS Report — {target}"
 date: "{timestamp}"
@@ -300,7 +289,7 @@ toc-title: "Содержание"
 \\textcolor{{aegisgray}}{{\\large Autonomous Exploitation \\& Guidance Intelligence System}}\\\\[0.5cm]
 \\textcolor{{aegiscyan}}{{\\Large Цель: {target}}}\\\\[0.2cm]
 \\textcolor{{aegisgray}}{{Дата: {timestamp}}}\\\\[0.2cm]
-\\textcolor{{aegisgray}}{{Версия: AEGIS Web v2.2}}
+\\textcolor{{aegisgray}}{{Версия: AEGIS Web v2.3}}
 \\end{{center}}
 
 \\vspace{{1cm}}
@@ -308,12 +297,16 @@ toc-title: "Содержание"
 # 1. Разведка
 
 ## 1.1. Результаты nmap
-{nmap_compressed}                                                               
+{nmap_compressed}
+
 # 2. Анализ (LLM)
 
 {analysis if analysis else "нет данных"}
 
 # 3. CVE по сервисам
+"""
+
+    # ─── Секция 3: CVE-таблица ───
     if data:
         rows = _cve_rows(data)
         if rows:
@@ -335,6 +328,7 @@ toc-title: "Содержание"
     else:
         report += "\n_Нет данных._\n"
 
+    # ─── Секция 4: Эксплуатация ───
     report += "\n# 4. Эксплуатация уязвимостей\n\n"
     if exploit_results:
         for i, r in enumerate(exploit_results, 1):
@@ -344,17 +338,17 @@ toc-title: "Содержание"
             report += f"**Порт:** {r['port']}  \n"
             report += f"**Версия:** `{clean_text(r.get('matched_version', ''))}`  \n"
             report += f"**Результат:** {success}\n\n"
-            log = clean_text(r["result"].get("log", ""))
-            report += f"```\n{log[:3000]}\n```\n\n"
+            log_text = clean_text(r["result"].get("log", ""))
+            report += f"```\n{log_text[:3000]}\n```\n\n"
     else:
         report += "_Эксплуатация не запускалась._\n\n"
 
-    # Evidence
-    has_evidence = (data and data.get("evidence") and 
-                data["evidence"].get("commands"))
+    # ─── Секция 5: Evidence + IMPACT ───
+    has_evidence = (data and data.get("evidence")
+                    and data["evidence"].get("commands"))
     if has_evidence:
         report += _evidence_section(data)
-        report += _impact_section(data, exploit_results)   # ← отдельный вызов
+        report += _impact_section(data, exploit_results)
     elif exploit_results:
         report += "\n\\newpage\n# 5. Доказательства взлома\n\n"
         report += ("_Эксплуатация выполнена, но не дала root-доступа. "
@@ -363,8 +357,8 @@ toc-title: "Содержание"
         report += "\n\\newpage\n# 5. Эксплуатация — не выполнялась\n\n"
         report += ("_В базе AEGIS нет готовых PoC для найденных CVE. "
                    "Все уязвимости требуют ручной проверки._\n\n")
-    
-    # Проверка сервисов
+
+    # ─── Секция 6: Проверка сервисов ───
     report += "\n# 6. Проверка сервисов\n\n"
     if scripts_results:
         for i, info in enumerate(scripts_results, 1):
@@ -379,19 +373,22 @@ toc-title: "Содержание"
     else:
         report += "_Скрипты не генерировались._\n\n"
 
-    # Сводка портов
+    # ─── Секция 7: Сводка портов ───
     report += "\n# 7. Сводная таблица портов\n\n"
     if ports:
         report += "| Порт | Сервис | Версия |\n|------|--------|--------|\n"
         for p in ports:
-            report += f"| {p['port']} | {clean_text(p['service'])} | {clean_text(p.get('version', ''))[:60]} |\n"
+            report += (f"| {p['port']} | {clean_text(p['service'])} | "
+                       f"{clean_text(p.get('version', ''))[:60]} |\n")
         report += "\n"
     else:
         report += "_Нет данных._\n\n"
 
-report += "# 8. Рекомендации по защите\n\n"
-report += _recommendations(data, ports) + "\n\n"
+    # ─── Секция 8: Рекомендации ───
+    report += "# 8. Рекомендации по защите\n\n"
+    report += _recommendations(data, ports) + "\n\n"
 
+    # ─── Футер ───
     report += (
         "\\vspace{1cm}\n\n"
         "\\begin{center}\n"
@@ -400,7 +397,8 @@ report += _recommendations(data, ports) + "\n\n"
         "\\textcolor{aegisgray}{\\small Только для авторизованного пентеста.}\n"
         "\\end{center}\n"
     )
-    # --- Запись файлов ---
+
+    # ─── Запись файлов ───
     os.makedirs(REPORT_DIR, exist_ok=True)
 
     header_path = os.path.join(REPORT_DIR, "aegis-header.tex")
@@ -412,12 +410,12 @@ report += _recommendations(data, ports) + "\n\n"
         f.write(report)
     log.info("report_markdown_written", path=md_path)
 
-    # --- PDF (опционально) ---
+    # ─── PDF (опционально) ───
     if skip_pdf:
         log.info("pdf_skipped_by_env")
         return md_path, None
-    pdf_path = None
 
+    pdf_path = None
     try:
         pdf_path = os.path.join(REPORT_DIR, f"report_{date_slug}.pdf")
         result = subprocess.run(
@@ -432,16 +430,18 @@ report += _recommendations(data, ports) + "\n\n"
              "-V", "colorlinks=true",
              "-V", "linkcolor=aegiscyan",
              "-V", "toccolor=aegisred"],
-            capture_output=True, text=True, timeout=180
+            capture_output=True, text=True, timeout=180,
         )
         if result.returncode == 0 and os.path.exists(pdf_path):
-            print(f"[+] PDF: {pdf_path}")
+            log.info("report_pdf_written", path=pdf_path)
         else:
-            print(f"[!] pandoc: {result.stderr[:500]}")
+            log.warning("pandoc_failed", stderr=result.stderr[:500])
             pdf_path = None
     except FileNotFoundError:
-        print("[!] pandoc не установлен")
+        log.warning("pandoc_not_installed")
+        pdf_path = None                # ← добавить эту строку
     except Exception as e:
-        print(f"[!] Ошибка PDF: {e}")
+        log.error("pdf_render_failed", err=str(e))
+        pdf_path = None
 
     return md_path, pdf_path
